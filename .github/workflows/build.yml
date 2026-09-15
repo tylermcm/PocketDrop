@@ -6,6 +6,63 @@ on:
   workflow_dispatch:
 
 jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libcurl4-openssl-dev xvfb
+
+      - name: Build app
+        run: bash build_linux.sh
+
+      - name: Inspect and smoke-test app
+        run: |
+          file build/PocketDrop-linux-x86_64/PocketDrop
+          ldd build/PocketDrop-linux-x86_64/PocketDrop
+          set +e
+          timeout 4s xvfb-run -a build/PocketDrop-linux-x86_64/PocketDrop
+          code=$?
+          set -e
+          test "$code" -eq 124
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install opencv-python-headless pillow
+
+      - name: Build tests
+        run: bash tests/build_tests_linux.sh build/tests-linux
+
+      - name: Core tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/out"
+          python tests/verify.py gen "$RUNNER_TEMP/src"
+          python tests/server_check.py gen "$RUNNER_TEMP/src"
+          build/tests-linux/core_test "$RUNNER_TEMP/out" "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv"
+          python tests/verify.py check "$RUNNER_TEMP/out" "$RUNNER_TEMP/src"
+
+      - name: HTTP server tests
+        run: |
+          build/tests-linux/server_test 25 "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
+          sleep 2
+          python tests/server_check.py check "$RUNNER_TEMP/src"
+          node tests/check_page_js.mjs
+          wait
+
+      - name: Tunnel test
+        continue-on-error: true
+        timeout-minutes: 5
+        run: build/tests-linux/tunnel_test 90 --download
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketDrop-linux
+          path: build/PocketDrop-linux-x86_64.tar.gz
+
   macos:
     runs-on: macos-latest
     steps:

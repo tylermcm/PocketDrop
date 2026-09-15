@@ -49,3 +49,7 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(icns), exist_ok=True)
     mac.save(icns)
     print("wrote", os.path.abspath(icns))
+    linux = os.path.join(src, "linux", "app.png")
+    os.makedirs(os.path.dirname(linux), exist_ok=True)
+    big.resize((256, 256), Image.LANCZOS).save(linux)
+    print("wrote", os.path.abspath(linux))

@@ -2,7 +2,7 @@
 
 Drop files on your PC, scan the QR code, download on your phone. No phone app, no account.
 
-A single ~0.5 MB native Windows executable (C++20, Win32 + Direct2D, static CRT, no runtime dependencies).
+Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or account required.
 
 ## Features
 
@@ -14,9 +14,9 @@ A single ~0.5 MB native Windows executable (C++20, Win32 + Direct2D, static CRT,
   - CRCs and compression are computed in parallel in the background, so the zip streams immediately with an exact size, resumable range requests, and zip64 for very large bundles.
 - **Two ways to connect**:
   - **Same Wi-Fi**: direct LAN transfer, fastest.
-  - **Anywhere**: a Cloudflare quick tunnel (`https://*.trycloudflare.com`), so a phone on mobile data can reach the PC. It needs no port forwarding, no account, and no VPN app on the phone. `cloudflared` is fetched once on request, and its code signature is checked.
+  - **Anywhere**: a Cloudflare quick tunnel (`https://*.trycloudflare.com`), so a phone on mobile data can reach the computer. It needs no port forwarding, no account, and no VPN app on the phone. `cloudflared` is fetched once on request and validated before installation.
 - **Phone page**:
-  - The file list shows thumbnails for photos, videos and PDFs, rendered by Windows' thumbnail handlers.
+  - The file list shows available thumbnails for photos, videos and PDFs using each desktop platform's native image services.
   - Buttons: per-file download, **Download all**, copy (and open, for links) on shared text, and **Save to Photos** over HTTPS.
   - Updates live as you add files and adapts to light or dark mode.
 - **Desktop**:
@@ -25,6 +25,8 @@ A single ~0.5 MB native Windows executable (C++20, Win32 + Direct2D, static CRT,
   - Optional **Send to → PocketDrop** shortcut. The app is single-instance, so Send to adds to the open window.
 
 ## Build
+
+### Windows
 
 Requires Visual Studio 2022 Build Tools with the C++ workload.
 
@@ -36,12 +38,34 @@ Output: `build\PocketDrop.exe`. You can also pass paths on the command line: `Po
 
 On first launch Windows asks whether to allow network access. Choose **Allow** for private networks, or phones on your Wi-Fi can't connect.
 
+### macOS
+
+Requires Xcode or the Command Line Tools. Builds a universal Apple Silicon + Intel app for macOS 11 or later.
+
+```sh
+bash build_mac.sh
+```
+
+Output: `build/PocketDrop.app` and `build/PocketDrop-mac.zip`.
+
+### Linux
+
+Requires GTK 3, libcurl, a C++20 compiler, and pkg-config. The release build targets x86_64 Ubuntu 22.04 or later.
+
+```sh
+sudo apt install g++ pkg-config libgtk-3-dev libcurl4-openssl-dev
+bash build_linux.sh
+```
+
+Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x86_64.tar.gz`.
+
 ## Security model
 
 - Every link has a random 128-bit token. Wrong tokens get a plain 404.
 - Links die when PocketDrop closes, when you choose **New link**, or after a download if that option is on.
 - Responses carry `Referrer-Policy: no-referrer` and a strict CSP. HTML and SVG previews are sandboxed.
 - Same Wi-Fi mode is plain HTTP on your LAN. Anywhere mode is HTTPS from the phone to Cloudflare, and then goes through the tunnel.
+- Windows verifies the downloaded cloudflared executable's publisher signature. macOS validates its code-signing state. Linux checks that the official HTTPS download is a valid ELF executable before installing it in the user's application-data directory.
 
 ## Troubleshooting Anywhere mode
 
@@ -57,6 +81,7 @@ On first launch Windows asks whether to allow network access. Choose **Allow** f
 | `src/ui/` | Shared app state, layout, painting, hit testing, and vector icons |
 | `src/win/` | Win32 windowing, Direct2D graphics, platform services, resources, and entry point |
 | `src/mac/` | AppKit windowing, Core Graphics, platform services, bundle metadata, and entry point |
+| `src/linux/` | GTK windowing, Cairo/Pango graphics, Linux platform services, icon, and entry point |
 | `tests/` | Encoder/zip checks (`core_test` + `verify.py`), HTTP checks (`server_test` + `server_check.py`) |
 
 ## Phase 2 (two-way) notes
