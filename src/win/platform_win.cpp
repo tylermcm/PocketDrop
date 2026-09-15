@@ -8,6 +8,7 @@
 #include <bcrypt.h>
 #include <iphlpapi.h>
 #include <objbase.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <wincodec.h>
 #include <wincrypt.h>
@@ -360,6 +361,24 @@ std::string app_data_dir() {
     d += L"\\PocketDrop";
     CreateDirectoryW(d.c_str(), nullptr);
     return utf8(d);
+}
+
+std::string downloads_dir() {
+    PWSTR p = nullptr;
+    std::string out;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p))) out = utf8(p);
+    CoTaskMemFree(p);
+    if (out.empty()) {
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
+        if (n && n < MAX_PATH) out = utf8(std::wstring(buf, n)) + "\\Downloads";
+    }
+    return out;
+}
+
+uint64_t free_disk_space(const std::string& path) {
+    ULARGE_INTEGER avail;
+    return GetDiskFreeSpaceExW(wide(path).c_str(), &avail, nullptr, nullptr) ? avail.QuadPart : UINT64_MAX;
 }
 
 std::string exe_dir() {

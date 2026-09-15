@@ -25,13 +25,18 @@ public:
     // Clipboard contents: file paths, else an image saved as a PNG file path, else text.
     virtual void readClipboard(std::vector<std::string>& paths, std::string& text) = 0;
     virtual void browse(bool folders, std::function<void(const std::vector<std::string>&)> done) = 0;
+    virtual void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) = 0;
     virtual void openUrl(const std::string& url) = 0;
+    virtual void revealPath(const std::string& path) = 0; // show a file selected in the file manager
+    virtual void attention() {}                           // taskbar flash / Dock bounce when not focused
     // Shows a menu with its top-right corner at (x, y) in DIPs. Returns the chosen id or 0.
     virtual int popupMenu(const std::vector<MenuItem>& items, float x, float y) = 0;
     virtual void alert(const std::string& title, const std::string& message) = 0;
 
     virtual int loadSetting(const char* key, int def) = 0;
     virtual void saveSetting(const char* key, int value) = 0;
+    virtual std::string loadString(const char* key, const std::string& def) = 0;
+    virtual void saveString(const char* key, const std::string& value) = 0;
     virtual void setTopmost(bool on) = 0;
 
     // Platform-only menu entries (ids >= 1000), e.g. Windows' "Send to" shortcut.

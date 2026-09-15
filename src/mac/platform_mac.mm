@@ -19,6 +19,7 @@
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <algorithm>
@@ -270,6 +271,18 @@ std::string app_data_dir() {
         [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
         return ns2s(dir);
     }
+}
+
+std::string downloads_dir() {
+    @autoreleasepool {
+        NSArray* dirs = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory, NSUserDomainMask, YES);
+        return ns2s(dirs.count ? dirs[0] : [NSHomeDirectory() stringByAppendingPathComponent:@"Downloads"]);
+    }
+}
+
+uint64_t free_disk_space(const std::string& path) {
+    struct statvfs v;
+    return statvfs(path.c_str(), &v) == 0 ? (uint64_t)v.f_bavail * (uint64_t)v.f_frsize : UINT64_MAX;
 }
 
 std::string exe_dir() {

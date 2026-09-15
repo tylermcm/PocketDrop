@@ -16,6 +16,7 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <algorithm>
@@ -222,6 +223,33 @@ std::string app_data_dir() {
     std::string dir = base + "/PocketDrop";
     make_dir(dir);
     return dir;
+}
+
+std::string downloads_dir() {
+    const char* homeEnv = getenv("HOME");
+    std::string home = homeEnv && *homeEnv ? homeEnv : ".";
+    const char* cfgEnv = getenv("XDG_CONFIG_HOME");
+    std::string cfg = cfgEnv && *cfgEnv ? cfgEnv : home + "/.config";
+    if (FILE* f = fopen((cfg + "/user-dirs.dirs").c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            std::string s = line;
+            if (s.rfind("XDG_DOWNLOAD_DIR=", 0) != 0) continue;
+            size_t a = s.find('"'), b = s.rfind('"');
+            if (a == std::string::npos || b <= a) break;
+            std::string v = s.substr(a + 1, b - a - 1);
+            if (v.rfind("$HOME", 0) == 0) v = home + v.substr(5);
+            fclose(f);
+            return v;
+        }
+        fclose(f);
+    }
+    return home + "/Downloads";
+}
+
+uint64_t free_disk_space(const std::string& path) {
+    struct statvfs v {};
+    return statvfs(path.c_str(), &v) == 0 ? (uint64_t)v.f_bavail * (uint64_t)v.f_frsize : UINT64_MAX;
 }
 
 std::string exe_dir() {

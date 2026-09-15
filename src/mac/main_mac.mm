@@ -136,6 +136,28 @@ public:
         if (NSURL* u = [NSURL URLWithString:s2ns(url)]) [[NSWorkspace sharedWorkspace] openURL:u];
     }
 
+    void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.canCreateDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        panel.message = s2ns(title);
+        panel.prompt = @"Choose";
+        [panel beginSheetModalForWindow:window
+                      completionHandler:^(NSModalResponse result) {
+                        if (result == NSModalResponseOK && panel.URL) done(panel.URL.path.UTF8String);
+                      }];
+    }
+
+    void revealPath(const std::string& path) override {
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ [NSURL fileURLWithPath:s2ns(path)] ]];
+    }
+
+    void attention() override {
+        if (!NSApp.isActive) [NSApp requestUserAttention:NSInformationalRequest];
+    }
+
     int popupMenu(const std::vector<MenuItem>& items, float x, float y) override {
         PDMenuTarget* target = [PDMenuTarget new];
         NSMenu* menu = buildMenu(items, target);
@@ -159,6 +181,15 @@ public:
 
     void saveSetting(const char* key, int value) override {
         [[NSUserDefaults standardUserDefaults] setInteger:value forKey:@(key)];
+    }
+
+    std::string loadString(const char* key, const std::string& def) override {
+        NSString* v = [[NSUserDefaults standardUserDefaults] stringForKey:@(key)];
+        return v ? std::string(v.UTF8String) : def;
+    }
+
+    void saveString(const char* key, const std::string& value) override {
+        [[NSUserDefaults standardUserDefaults] setObject:s2ns(value) forKey:@(key)];
     }
 
     void setTopmost(bool on) override { window.level = on ? NSFloatingWindowLevel : NSNormalWindowLevel; }

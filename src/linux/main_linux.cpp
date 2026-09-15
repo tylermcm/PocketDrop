@@ -152,6 +152,51 @@ public:
         if (error) g_error_free(error);
     }
 
+    void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
+        GtkWidget* dialog = gtk_file_chooser_dialog_new(title.c_str(), GTK_WINDOW(window),
+                                                        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, "Cancel",
+                                                        GTK_RESPONSE_CANCEL, "Choose", GTK_RESPONSE_ACCEPT, nullptr);
+        std::string chosen;
+        if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+            if (gchar* file = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog))) {
+                chosen = file;
+                g_free(file);
+            }
+        }
+        gtk_widget_destroy(dialog);
+        if (!chosen.empty()) done(chosen);
+    }
+
+    void revealPath(const std::string& path) override {
+        // Ask the desktop's file manager to select the file; otherwise open its folder.
+        bool shown = false;
+        gchar* uri = g_filename_to_uri(path.c_str(), nullptr, nullptr);
+        GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+        if (bus && uri) {
+            const gchar* uris[] = {uri, nullptr};
+            GVariant* reply = g_dbus_connection_call_sync(
+                bus, "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1",
+                "ShowItems", g_variant_new("(^ass)", uris, ""), nullptr, G_DBUS_CALL_FLAGS_NONE, 3000, nullptr, nullptr);
+            if (reply) {
+                shown = true;
+                g_variant_unref(reply);
+            }
+        }
+        if (bus) g_object_unref(bus);
+        g_free(uri);
+        if (shown) return;
+        size_t slash = path.find_last_of('/');
+        std::string dir = slash == std::string::npos ? path : path.substr(0, slash);
+        if (gchar* dirUri = g_filename_to_uri(dir.c_str(), nullptr, nullptr)) {
+            gtk_show_uri_on_window(GTK_WINDOW(window), dirUri, GDK_CURRENT_TIME, nullptr);
+            g_free(dirUri);
+        }
+    }
+
+    void attention() override {
+        if (window && !gtk_window_is_active(GTK_WINDOW(window))) gtk_window_set_urgency_hint(GTK_WINDOW(window), TRUE);
+    }
+
     int popupMenu(const std::vector<MenuItem>& items, float, float) override {
         MenuPick pick;
         pick.loop = g_main_loop_new(nullptr, FALSE);
@@ -199,6 +244,32 @@ public:
         GKeyFile* file = g_key_file_new();
         g_key_file_load_from_file(file, path.c_str(), G_KEY_FILE_NONE, nullptr);
         g_key_file_set_integer(file, "PocketDrop", key, value);
+        gsize size = 0;
+        gchar* data = g_key_file_to_data(file, &size, nullptr);
+        g_file_set_contents(path.c_str(), data, (gssize)size, nullptr);
+        g_free(data);
+        g_key_file_unref(file);
+    }
+
+    std::string loadString(const char* key, const std::string& def) override {
+        std::string path = util::path_join(plat::app_data_dir(), "settings.ini");
+        GKeyFile* file = g_key_file_new();
+        std::string value = def;
+        if (g_key_file_load_from_file(file, path.c_str(), G_KEY_FILE_NONE, nullptr)) {
+            if (gchar* found = g_key_file_get_string(file, "PocketDrop", key, nullptr)) {
+                value = found;
+                g_free(found);
+            }
+        }
+        g_key_file_unref(file);
+        return value;
+    }
+
+    void saveString(const char* key, const std::string& value) override {
+        std::string path = util::path_join(plat::app_data_dir(), "settings.ini");
+        GKeyFile* file = g_key_file_new();
+        g_key_file_load_from_file(file, path.c_str(), G_KEY_FILE_NONE, nullptr);
+        g_key_file_set_string(file, "PocketDrop", key, value.c_str());
         gsize size = 0;
         gchar* data = g_key_file_to_data(file, &size, nullptr);
         g_file_set_contents(path.c_str(), data, (gssize)size, nullptr);
@@ -367,6 +438,12 @@ void createWindow(App* app, const std::vector<std::string>& initial) {
                      app);
     g_signal_connect(app->shell.view, "drag-data-received", G_CALLBACK(receiveDrop), app);
 
+    g_signal_connect(app->shell.window, "focus-in-event",
+                     G_CALLBACK(+[](GtkWidget* w, GdkEventFocus*, gpointer) -> gboolean {
+                         gtk_window_set_urgency_hint(GTK_WINDOW(w), FALSE);
+                         return FALSE;
+                     }),
+                     nullptr);
     g_signal_connect(app->shell.window, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer data) {
                          auto* a = (App*)data;
                          if (a->slowTimer) {
