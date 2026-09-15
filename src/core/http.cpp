@@ -536,6 +536,8 @@ bool HttpServer::handle(plat::Sock s, const Req& r, bool viaTunnel) {
         long long i = indexAfter(3);
         if (i < 0) return simple(s, 404, head, keep);
         const BundleFile& f = b->files[(size_t)i];
+        std::string kind = kindOf(f.name);
+        if (kind != "image" && kind != "video" && kind != "pdf") return simple(s, 404, head, keep);
         std::string key = f.path + "|" + std::to_string(f.size) + "|" + std::to_string(f.dosDate) + "|" +
                           std::to_string(f.dosTime);
         std::shared_ptr<const std::vector<uint8_t>> jpg;
