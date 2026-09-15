@@ -328,7 +328,8 @@ void createWindow(App* app, const std::vector<std::string>& initial) {
                      app);
     g_signal_connect(app->shell.view, "scroll-event",
                      G_CALLBACK(+[](GtkWidget*, GdkEventScroll* e, gpointer data) -> gboolean {
-                         double dx = 0, dy = 0;
+                         double dx = 0;
+                         double dy = 0;
                          float lines = 0;
                          if (gdk_event_get_scroll_deltas((GdkEvent*)e, &dx, &dy)) lines = (float)-dy;
                          else if (e->direction == GDK_SCROLL_UP) lines = 1;

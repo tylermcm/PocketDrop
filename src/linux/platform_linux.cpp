@@ -28,8 +28,6 @@
 
 namespace {
 
-void setCloexec(int fd) { fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC); }
-
 struct CurlCtx {
     plat::File out;
     std::string* body;
