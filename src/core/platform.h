@@ -51,6 +51,8 @@ void make_dir(const std::string& path);
 extern const char PATH_SEP;
 std::string app_data_dir(); // created if missing
 std::string exe_dir();
+std::string downloads_dir();                       // the user's Downloads folder
+uint64_t free_disk_space(const std::string& path); // bytes available to this user; UINT64_MAX if unknown
 
 // ---- Time and misc
 int64_t unix_time();

@@ -196,6 +196,36 @@ public:
         ShellExecuteW(hwnd, L"open", wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
+    void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
+        ComPtr<IFileOpenDialog> d;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
+        FILEOPENDIALOGOPTIONS o = 0;
+        d->GetOptions(&o);
+        d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        d->SetTitle(wide(title).c_str());
+        if (FAILED(d->Show(hwnd))) return;
+        ComPtr<IShellItem> it;
+        PWSTR p = nullptr;
+        if (SUCCEEDED(d->GetResult(&it)) && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) {
+            std::string path = utf8(p);
+            CoTaskMemFree(p);
+            done(path);
+        }
+    }
+
+    void revealPath(const std::string& path) override {
+        if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(wide(path).c_str())) {
+            SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+            ILFree(pidl);
+        }
+    }
+
+    void attention() override {
+        if (GetForegroundWindow() == hwnd) return;
+        FLASHWINFO fi{sizeof fi, hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+        FlashWindowEx(&fi);
+    }
+
     int popupMenu(const std::vector<MenuItem>& items, float x, float y) override {
         HMENU m = buildMenu(items);
         float s = dpi / 96.0f;
@@ -225,6 +255,23 @@ public:
             return;
         DWORD v = (DWORD)value;
         RegSetValueExW(k, wide(key).c_str(), 0, REG_DWORD, (const BYTE*)&v, sizeof v);
+        RegCloseKey(k);
+    }
+
+    std::string loadString(const char* key, const std::string& def) override {
+        wchar_t buf[4096];
+        DWORD sz = sizeof buf;
+        if (RegGetValueW(HKEY_CURRENT_USER, REG_KEY, wide(key).c_str(), RRF_RT_REG_SZ, nullptr, buf, &sz) == ERROR_SUCCESS)
+            return utf8(buf);
+        return def;
+    }
+
+    void saveString(const char* key, const std::string& value) override {
+        HKEY k;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS)
+            return;
+        std::wstring w = wide(value);
+        RegSetValueExW(k, wide(key).c_str(), 0, REG_SZ, (const BYTE*)w.c_str(), (DWORD)((w.size() + 1) * sizeof(wchar_t)));
         RegCloseKey(k);
     }
 

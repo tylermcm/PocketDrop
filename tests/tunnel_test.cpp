@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
         std::cerr << "server start failed\n";
         return 1;
     }
-    srv.publish(build_bundle({}, {"tunnel test"}, nullptr), "tunneltoken");
+    srv.publish(build_bundle({}, {"tunnel test"}, nullptr));
 
     uint64_t t0 = plat::tick_ms();
     Tunnel* tp = nullptr;

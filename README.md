@@ -1,6 +1,6 @@
 # PocketDrop
 
-Drop files on your PC, scan the QR code, download on your phone. No phone app, no account.
+Move files and text between your computer and your phone, in either direction, by scanning a QR code. No phone app, no account.
 
 Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or account required.
 
@@ -15,6 +15,11 @@ Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or ac
 - **Two ways to connect**:
   - **Same Wi-Fi**: direct LAN transfer, fastest.
   - **Anywhere**: a Cloudflare quick tunnel (`https://*.trycloudflare.com`), so a phone on mobile data can reach the computer. It needs no port forwarding, no account, and no VPN app on the phone. `cloudflared` is fetched once on request and validated before installation.
+- **Send from your phone**:
+  - The phone page has **Send to <computer>**: pick photos, videos or any files, or send a note.
+  - Uploads go in resumable 8 MB chunks with progress, speed, cancel and retry, and keep the screen awake while sending. There's no size limit.
+  - Files land in `Downloads/PocketDrop` (changeable from the ⋯ menu) under their original name, with ` (2)` added if the name is taken. Received files and notes appear at the top of the desktop list: click a file to show it in its folder, or a note to copy it.
+  - If the computer runs out of disk space, the phone shows a clear error instead of stalling.
 - **Phone page**:
   - The file list shows available thumbnails for photos, videos and PDFs using each desktop platform's native image services.
   - Buttons: per-file download, **Download all**, copy (and open, for links) on shared text, and **Save to Photos** over HTTPS.
@@ -62,7 +67,12 @@ Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x
 ## Security model
 
 - Every link has a random 128-bit token. Wrong tokens get a plain 404.
-- Links die when PocketDrop closes, when you choose **New link**, or after a download if that option is on.
+- Opening the QR link starts a private phone session at its own URL, so the QR link can change without interrupting an open page or an upload.
+- Links refresh on their own:
+  - a new link every time PocketDrop starts;
+  - every 60 seconds while nothing is shared and no phone has the page open;
+  - once something is shared, after 15 minutes with no phone activity. Phone sessions also end after 15 minutes idle, but never during a transfer.
+- Links also end when PocketDrop closes, when you choose **New link**, or after a download if that option is on.
 - Responses carry `Referrer-Policy: no-referrer` and a strict CSP. HTML and SVG previews are sandboxed.
 - Same Wi-Fi mode is plain HTTP on your LAN. Anywhere mode is HTTPS from the phone to Cloudflare, and then goes through the tunnel.
 - Windows verifies the downloaded cloudflared executable's publisher signature. macOS validates its code-signing state. Linux checks that the official HTTPS download is a valid ELF executable before installing it in the user's application-data directory.
@@ -82,10 +92,18 @@ Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x
 | `src/win/` | Win32 windowing, Direct2D graphics, platform services, resources, and entry point |
 | `src/mac/` | AppKit windowing, Core Graphics, platform services, bundle metadata, and entry point |
 | `src/linux/` | GTK windowing, Cairo/Pango graphics, Linux platform services, icon, and entry point |
-| `tests/` | Encoder/zip checks (`core_test` + `verify.py`), HTTP checks (`server_test` + `server_check.py`) |
+| `tests/` | Encoder/zip checks (`core_test` + `verify.py`); HTTP, upload and link-expiry checks (`server_test` + `server_check.py`, run from the repo root); phone page script check (`check_page_js.mjs`) |
 
-## Phase 2 (two-way) notes
+## Phone upload protocol
 
-The server already routes by token and tracks transfers, so uploads fit in as `POST /<token>/up`.
+All paths are relative to the phone session URL `/s/<session>/`:
 
-Cloudflare limits request bodies to 100 MB on quick tunnels, so uploads from the phone should be sent in chunks, for example 8 MB `PUT`s with an offset, then assembled on the PC.
+| Request | Purpose |
+|---|---|
+| `POST up?name=<name>&size=<bytes>` | Start an upload. Returns `{"id","received":0,"chunk"}`, or `507 {"error":"disk"}` when there isn't room. |
+| `PUT up/<id>?offset=<n>` | Write one chunk (≤ 32 MB; the page uses 8 MB to stay under Cloudflare's 100 MB request limit). Re-sending a chunk is safe; an offset past what was received returns `409 {"received"}`. The final chunk returns `{"done":true,"name"}` with the saved name. |
+| `GET up/<id>` | Bytes received so far, for resuming after a dropped connection. |
+| `DELETE up/<id>` | Cancel and delete the partial file. |
+| `POST text` | Send a note (UTF-8 body, up to 1 MB). |
+
+Partial files are written as `<name>.<id>.pdpart` in the received-files folder and renamed when complete.

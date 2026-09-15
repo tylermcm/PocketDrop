@@ -47,10 +47,10 @@ jobs:
 
       - name: HTTP server tests
         run: |
-          build/tests-linux/server_test 25 "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
+          build/tests-linux/server_test 90"$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
           sleep 2
-          python tests/server_check.py check "$RUNNER_TEMP/src"
           node tests/check_page_js.mjs
+          python tests/server_check.py check "$RUNNER_TEMP/src"
           wait
 
       - name: Tunnel test
@@ -97,10 +97,10 @@ jobs:
 
       - name: HTTP server tests
         run: |
-          build/tests/server_test 25 "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
+          build/tests/server_test 90"$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
           sleep 2
-          python tests/server_check.py check "$RUNNER_TEMP/src"
           node tests/check_page_js.mjs
+          python tests/server_check.py check "$RUNNER_TEMP/src"
           wait
 
       - name: Tunnel test (downloads cloudflared)
@@ -146,13 +146,13 @@ jobs:
           build\tests\core_test.exe $out "$src\Photos Trip" "$src\single.csv"
           python tests/verify.py check $out $src
           if ($LASTEXITCODE) { exit 1 }
-          $p = Start-Process -PassThru -NoNewWindow build\tests\server_test.exe -ArgumentList 25, "`"$src\Photos Trip`"", "`"$src\single.csv`""
+          $p = Start-Process -PassThru -NoNewWindow build\tests\server_test.exe -ArgumentList 90, "`"$src\Photos Trip`"", "`"$src\single.csv`""
           Start-Sleep 2
-          python tests/server_check.py check $src
-          if ($LASTEXITCODE) { exit 1 }
           node tests/check_page_js.mjs
           if ($LASTEXITCODE) { exit 1 }
-          $p.WaitForExit(40000) | Out-Null
+          python tests/server_check.py check $src
+          if ($LASTEXITCODE) { exit 1 }
+          $p.WaitForExit(20000) | Out-Null
 
       - uses: actions/upload-artifact@v4
         with:

@@ -5,10 +5,9 @@
 
 namespace {
 
-const uint32_t BG = 0x0F0F13, SURF = 0x19191F, SURF2 = 0x23232B, SURF3 = 0x2E2E38, LINE = 0x2B2B35,
-               TEXT = 0xF3F3F6, MUTE = 0x9B9BA8, FAINT = 0x6B6B78, ACC = 0x8B7CFF, ACCHI = 0x9D90FF,
-               ACCTXT = 0xC4BBFF, ACC2 = 0x4FC3F7, GREEN = 0x3ECF8E, RED = 0xFF6B6B, AMBER = 0xF5B84B,
-               WHITE = 0xFFFFFF;
+const uint32_t BG = 0x0F0F13, SURF = 0x19191F, SURF2 = 0x23232B, SURF3 = 0x2E2E38, TEXT = 0xF3F3F6, MUTE = 0x9B9BA8,
+               FAINT = 0x6B6B78, ACC = 0x8B7CFF, ACCHI = 0x9D90FF, ACCTXT = 0xC4BBFF, ACC2 = 0x4FC3F7,
+               GREEN = 0x3ECF8E, RED = 0xFF6B6B, AMBER = 0xF5B84B, WHITE = 0xFFFFFF;
 const float M = 16.0f, ROW = 44.0f;
 
 enum MenuId {
@@ -23,14 +22,14 @@ enum MenuId {
     ID_TOPMOST,
     ID_STOP_TUNNEL,
     ID_ABOUT,
+    ID_OPEN_INBOX,
+    ID_CHANGE_INBOX,
     ID_ADDR_BASE = 500,
 };
 
 #ifdef __APPLE__
-const char* PASTE_HINT = "\xE2\x8C\x98V pastes files, text or screenshots"; // ⌘V
 const char* KEY_OPEN = "", *KEY_PASTE = "", *KEY_COPY = "";
 #else
-const char* PASTE_HINT = "Ctrl+V pastes files, text or screenshots";
 const char* KEY_OPEN = "\tCtrl+O", *KEY_PASTE = "\tCtrl+V", *KEY_COPY = "\tCtrl+C";
 #endif
 
@@ -57,6 +56,23 @@ std::string firstLine(const std::string& t) {
     return s;
 }
 
+// file:// URL for a local folder, understood by every platform's openUrl.
+std::string fileUrl(const std::string& path) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string p = path;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    std::string out = p.rfind('/', 0) == 0 ? "file://" : "file:///";
+    for (unsigned char c : p) {
+        if (isalnum(c) || strchr("/-_.~:", c)) out.push_back((char)c);
+        else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 15]);
+        }
+    }
+    return out;
+}
+
 void cleanOldPastes() {
     std::string dir = util::path_join(plat::app_data_dir(), "Pasted");
     int64_t now = plat::unix_time();
@@ -81,13 +97,14 @@ void Ui::start() {
     topmost_ = shell_.loadSetting("Topmost", 0) != 0;
     burnAfter_ = shell_.loadSetting("BurnAfter", 0) != 0;
     autoAnywhere_ = shell_.loadSetting("AutoAnywhere", 0) != 0;
+    inbox_ = shell_.loadString("InboxDir", util::path_join(plat::downloads_dir(), "PocketDrop"));
 
     tunnel_ = std::make_unique<Tunnel>([this] { post([this] { refreshQr(); updateAnimation(); }); });
     server_.onEvent = [this](HttpServer::Event e) { post([this, e] { onServer(e); }); };
+    server_.setInbox(inbox_);
     if (!server_.start(DEFAULT_PORT)) shell_.alert("PocketDrop", "PocketDrop couldn't start its local server.");
     addrs_ = plat::lan_addresses();
-    token_ = util::random_token(16);
-    server_.publish(nullptr, token_);
+    server_.publish(nullptr);
     if (topmost_) shell_.setTopmost(true);
     if (mode_ == 1 || (autoAnywhere_ && !Tunnel::findBinary().empty())) tunnel_->start(server_.port(), false);
     std::thread(cleanOldPastes).detach();
@@ -139,16 +156,25 @@ void Ui::addText(const std::string& text) {
 
 void Ui::removeRow(int index) {
     if (index < 0 || index >= rowCount()) return;
-    if (index < (int)paths_.size()) paths_.erase(paths_.begin() + index);
-    else texts_.erase(texts_.begin() + (index - (int)paths_.size()));
+    int nr = (int)received_.size(), np = (int)paths_.size();
     hover_ = {};
-    rebuild();
+    if (index < nr) {
+        received_.erase(received_.end() - 1 - index);
+    } else if (index < nr + np) {
+        paths_.erase(paths_.begin() + (index - nr));
+        rebuild();
+    } else {
+        texts_.erase(texts_.begin() + (index - nr - np));
+        rebuild();
+    }
     scroll_ = std::min(scroll_, maxScroll());
+    invalidate();
 }
 
 void Ui::clearAll() {
     paths_.clear();
     texts_.clear();
+    received_.clear();
     scroll_ = 0;
     rebuild();
 }
@@ -173,7 +199,7 @@ void Ui::onBuilt(uint64_t seq, std::shared_ptr<Bundle> b) {
     building_ = false;
     bundle_ = std::move(b);
     bundle_->startPrepare([this] { post([this] { updateAnimation(); invalidate(); }); });
-    server_.publish(bundle_, token_);
+    server_.publish(bundle_);
     refreshQr();
     updateAnimation();
     invalidate();
@@ -212,21 +238,21 @@ void Ui::setMode(int m) {
     updateAnimation();
 }
 
-void Ui::newToken() {
-    token_ = util::random_token(16);
-    server_.publish(bundle_, token_);
+void Ui::newLink() {
+    server_.newLink();
     refreshQr();
 }
 
 std::string Ui::shareUrl() const {
-    if (token_.empty() || !server_.port()) return {};
+    std::string token = server_.token();
+    if (token.empty() || !server_.port()) return {};
     if (mode_ == 1) {
         if (tunnel_->state() != Tunnel::State::Online) return {};
         std::string u = tunnel_->url();
-        return u.empty() ? std::string() : u + "/" + token_ + "/";
+        return u.empty() ? std::string() : u + "/" + token + "/";
     }
     if (addrs_.empty()) return {};
-    return "http://" + addrs_[(size_t)addrIndex_].ip + ":" + std::to_string(server_.port()) + "/" + token_ + "/";
+    return "http://" + addrs_[(size_t)addrIndex_].ip + ":" + std::to_string(server_.port()) + "/" + token + "/";
 }
 
 void Ui::refreshQr() {
@@ -265,21 +291,35 @@ void Ui::onServer(HttpServer::Event ev) {
         for (const auto& t : transfers_) {
             if (!t.done || ended_.count(t.id)) continue;
             ended_.insert(t.id);
-            if (!t.ok) continue;
+            if (!t.ok || t.incoming) continue; // arrivals are announced by Event::Received
             doneText_ = "Sent " + t.name + " to " + t.device;
             doneAt_ = now;
             burn = burnAfter_;
         }
-        if (burn) newToken();
+        if (burn) newLink();
         break;
     }
+    case HttpServer::Event::Received: onReceived(); break;
     }
     updateAnimation();
     invalidate();
 }
 
+void Ui::onReceived() {
+    auto items = server_.takeReceived();
+    if (items.empty()) return;
+    for (auto& it : items) {
+        doneText_ = it.isText ? "Received a note from " + it.device : "Received " + it.name + " from " + it.device;
+        received_.push_back(std::move(it));
+    }
+    doneAt_ = plat::tick_ms();
+    scroll_ = 0;
+    shell_.attention();
+}
+
 void Ui::tick() {
     uint64_t now = plat::tick_ms();
+    if (server_.maintain(sharing())) refreshQr();
     spin_ += 0.2f;
     if (spin_ > 6.2832f) spin_ -= 6.2832f;
     bool anyActive = std::any_of(transfers_.begin(), transfers_.end(), [](const TransferInfo& t) { return !t.done; });
@@ -300,7 +340,7 @@ void Ui::tick() {
         }
     }
     bool recent = (copiedAt_ && now - copiedAt_ < 2500) || (doneAt_ && now - doneAt_ < 7000) ||
-                  (visitAt_ && now - visitAt_ < 125000);
+                  (visitAt_ && now - visitAt_ < 125000) || (copiedRowAt_ && now - copiedRowAt_ < 2500);
     updateAnimation();
     if (animating_ || recent) invalidate();
 }
@@ -351,7 +391,6 @@ void Ui::click(const HitTarget& t) {
     case Hit::Menu: showMenu(); break;
     case Hit::ModeLocal: setMode(0); break;
     case Hit::ModeAnywhere: setMode(1); break;
-    case Hit::Drop: browse(false); break;
     case Hit::CardButton:
         tunnel_->start(server_.port(), cardState() == CardState::TunnelMissing);
         updateAnimation();
@@ -365,6 +404,18 @@ void Ui::click(const HitTarget& t) {
     case Hit::Third:
         if (rowCount()) clearAll();
         else paste();
+        break;
+    case Hit::Row:
+        if (t.index < (int)received_.size()) {
+            const ReceivedItem& it = receivedRow(t.index);
+            if (it.isText) {
+                shell_.copyText(it.text);
+                copiedRowId_ = it.id;
+                copiedRowAt_ = plat::tick_ms();
+            } else if (plat::file_stat(it.path).exists) {
+                shell_.revealPath(it.path);
+            }
+        }
         break;
     case Hit::RowRemove: removeRow(t.index); break;
     default: break;
@@ -401,6 +452,9 @@ void Ui::showMenu() {
         net.submenu.push_back(item(ID_ADDR_BASE + (int)i, addrs_[i].ip + "   " + addrs_[i].adapter, (int)i == addrIndex_));
     items.push_back(net);
     items.push_back(sep);
+    items.push_back(item(ID_OPEN_INBOX, "Open received files folder"));
+    items.push_back(item(ID_CHANGE_INBOX, "Change received files folder\xE2\x80\xA6"));
+    items.push_back(sep);
     items.push_back(item(ID_BURN, "Stop sharing after a download", burnAfter_));
     items.push_back(item(ID_AUTO_ANY, "Keep Anywhere tunnel ready", autoAnywhere_));
     items.push_back(item(ID_TOPMOST, "Always on top", topmost_));
@@ -421,7 +475,20 @@ void Ui::showMenu() {
     case ID_OPEN_BROWSER:
         if (hasLink) shell_.openUrl(qrText_);
         break;
-    case ID_NEW_LINK: newToken(); break;
+    case ID_NEW_LINK: newLink(); break;
+    case ID_OPEN_INBOX:
+        plat::make_dir(inbox_);
+        shell_.openUrl(fileUrl(inbox_));
+        break;
+    case ID_CHANGE_INBOX:
+        shell_.chooseFolder("Choose where received files are saved",
+                            [this, alive = std::weak_ptr<bool>(alive_)](const std::string& dir) {
+                                if (!alive.lock() || dir.empty()) return;
+                                inbox_ = dir;
+                                shell_.saveString("InboxDir", dir);
+                                server_.setInbox(dir);
+                            });
+        break;
     case ID_BURN: burnAfter_ = !burnAfter_; break;
     case ID_AUTO_ANY:
         autoAnywhere_ = !autoAnywhere_;
@@ -438,11 +505,15 @@ void Ui::showMenu() {
         break;
     case ID_ABOUT:
         shell_.alert("About PocketDrop",
-                     "PocketDrop 1.0\n\nDrop files, scan the QR code, and they download straight to your phone. No app "
-                     "or account needed on the phone.\n\nSame Wi-Fi: direct transfer over your local network (port " +
+                     "PocketDrop 2.0\n\nScan the QR code to move files and text between this computer and your phone, "
+                     "in either direction. No app or account needed on the phone.\n\nSame Wi-Fi: direct transfer over "
+                     "your local network (port " +
                          std::to_string(server_.port()) +
                          ").\nAnywhere: a Cloudflare quick tunnel (cloudflared) so phones on mobile data can connect "
-                         "too.\n\nLinks use a random 128-bit token and stop working when PocketDrop closes.");
+                         "too.\n\nReceived files are saved to:\n" +
+                         inbox_ +
+                         "\n\nLinks use a random 128-bit token, refresh automatically while unused, and stop working "
+                         "when PocketDrop closes.");
         break;
     default:
         if (cmd >= ID_ADDR_BASE && cmd < ID_ADDR_BASE + (int)addrs_.size()) {
@@ -499,7 +570,6 @@ Layout Ui::layout() const {
 
 CardState Ui::cardState() const {
     if (dragOver_) return CardState::DragOver;
-    if (paths_.empty() && texts_.empty()) return CardState::Empty;
     if (mode_ == 1) {
         switch (tunnel_->state()) {
         case Tunnel::State::Online: break;
@@ -526,7 +596,6 @@ HitTarget Ui::hitTest(float x, float y) const {
     if (inside(L.segAny, x, y)) return {Hit::ModeAnywhere};
     if (inside(L.card, x, y)) {
         CardState cs = cardState();
-        if (cs == CardState::Empty) return {Hit::Drop};
         if ((cs == CardState::TunnelMissing || cs == CardState::TunnelFailed) && inside(L.cardButton, x, y))
             return {Hit::CardButton};
         return {};
@@ -551,7 +620,6 @@ HitTarget Ui::hitTest(float x, float y) const {
 void Ui::paint(Gfx& g) {
     Layout L = layout();
     uint64_t now = plat::tick_ms();
-    bool hasContent = rowCount() > 0;
     auto hov = [&](Hit h) { return hover_.hit == h; };
     g.clear(rgb(BG));
 
@@ -568,13 +636,13 @@ void Ui::paint(Gfx& g) {
         status = "Offline";
         dot = RED;
     } else if (active) {
-        status = "Sending";
-        dot = ACC;
+        status = active->incoming ? "Receiving" : "Sending";
+        dot = active->incoming ? ACC2 : ACC;
     } else if (visitAt_ && now - visitAt_ < 120000) {
         status = visitDevice_ + " connected";
         dot = GREEN;
-    } else if (hasContent && !qrText_.empty()) {
-        status = "Live";
+    } else if (!qrText_.empty()) {
+        status = "Ready";
         dot = GREEN;
     } else {
         status = "Idle";
@@ -630,17 +698,6 @@ void Ui::paint(Gfx& g) {
         g.icon(Icon::Drop, rc(cx - 18, cy - 48, cx + 18, cy - 12), rgb(ACCTXT), 2.0f);
         centered("Drop to share", cy + 20, Font::Big, TEXT, 28);
         break;
-    case CardState::Empty: {
-        bool h = hov(Hit::Drop);
-        g.fillRound(c, 20, rgb(h ? 0x1C1C24 : SURF));
-        g.strokeRound(c, 20, rgb(h ? FAINT : LINE), 1.5f, true);
-        g.fillCircle({cx, cy - 42}, 34, rgb(SURF2));
-        g.icon(Icon::Drop, rc(cx - 17, cy - 59, cx + 17, cy - 25), rgb(ACCTXT), 2.0f);
-        centered("Drop files here", cy + 8, Font::Big, TEXT, 28);
-        centered("or click to browse", cy + 38, Font::Body, MUTE);
-        centered(PASTE_HINT, cy + 66, Font::Small, FAINT);
-        break;
-    }
     case CardState::TunnelBusy:
         g.fillRound(c, 20, rgb(SURF));
         g.spinner({cx, cy - 26}, 18, spin_, rgb(ACC), 3.0f);
@@ -730,16 +787,18 @@ void Ui::paint(Gfx& g) {
         auto sp = speeds_.find(active->id);
         std::string right = sp != speeds_.end() && sp->second.bps > 0 ? sizeStr((uint64_t)sp->second.bps) + "/s" : "";
         float rw = g.measure(right, Font::Small);
-        std::string left = std::to_string((int)(frac * 100)) + "%" + DOT + active->name + "  \xE2\x86\x92  " + active->device;
+        std::string left = std::to_string((int)(frac * 100)) + "%" + DOT + active->name +
+                           (active->incoming ? "  \xE2\x86\x90  " : "  \xE2\x86\x92  ") + active->device;
         g.text(left, rc(in.left, in.top, in.right - rw - 10, in.bottom), Font::SmallBold, rgb(TEXT));
         g.text(right, in, Font::Small, rgb(MUTE), Align::Right);
         RectF bar = rc(in.left, in.bottom + 2, in.right, in.bottom + 4);
         g.fillRound(bar, 1, rgb(SURF3));
-        g.fillRound(rc(bar.left, bar.top, bar.left + (float)((bar.right - bar.left) * frac), bar.bottom), 1, rgb(ACC));
+        g.fillRound(rc(bar.left, bar.top, bar.left + (float)((bar.right - bar.left) * frac), bar.bottom), 1,
+                    rgb(active->incoming ? ACC2 : ACC));
     } else if (doneAt_ && now - doneAt_ < 6000) {
         g.icon(Icon::Check, rc(in.left, in.top + 3, in.left + 16, in.top + 19), rgb(GREEN), 2.2f);
         g.text(doneText_, rc(in.left + 22, in.top, in.right, in.bottom), Font::SmallBold, rgb(GREEN));
-    } else if (hasContent) {
+    } else if (sharing()) {
         std::string left, right;
         if (bundle_ && !building_) {
             if (!bundle_->files.empty()) left = plural(bundle_->files.size(), "file") + DOT + sizeStr(bundle_->totalBytes);
@@ -761,18 +820,18 @@ void Ui::paint(Gfx& g) {
         g.text(left, rc(in.left, in.top, in.right - rw - 10, in.bottom), Font::Small, rgb(MUTE));
         g.text(right, in, Font::Small, rgb(FAINT), Align::Right);
     } else {
-        g.text(mode_ == 0 ? "Your phone needs to be on the same network" : "Works over mobile data via Cloudflare", in,
-               Font::Small, rgb(FAINT), Align::Center);
+        g.text(mode_ == 0 ? "Scan to send or receive  \xC2\xB7  same Wi-Fi" : "Scan to send or receive  \xC2\xB7  works anywhere",
+               in, Font::Small, rgb(FAINT), Align::Center);
     }
 
-    // ---- Item list
+    // ---- Item list: received (newest first), then shared files, then shared notes
     g.pushClip(L.list);
-    int n = rowCount();
+    int n = rowCount(), nr = (int)received_.size(), np = (int)paths_.size();
     if (n == 0) {
         float ty = L.list.top + 18;
-        g.text("Everything you add shows up here.", rc(L.list.left, ty, L.list.right, ty + 20), Font::Small, rgb(FAINT),
-               Align::Center);
-        g.text("The phone page updates live as you add more.", rc(L.list.left, ty + 20, L.list.right, ty + 40),
+        g.text("Drop files here to share them with your phone.", rc(L.list.left, ty, L.list.right, ty + 20),
+               Font::Small, rgb(FAINT), Align::Center);
+        g.text("Anything your phone sends shows up here too.", rc(L.list.left, ty + 20, L.list.right, ty + 40),
                Font::Small, rgb(FAINT), Align::Center);
     }
     for (int i = 0; i < n; i++) {
@@ -783,8 +842,26 @@ void Ui::paint(Gfx& g) {
         if (h) g.fillRound(r, 10, rgb(SURF));
         RectF ic = rc(r.left + 8, top + 8, r.left + 36, top + 36);
         std::string title, sub;
-        if (i < (int)paths_.size()) {
-            const std::string& p = paths_[(size_t)i];
+        if (i < nr) {
+            const ReceivedItem& it = receivedRow(i);
+            if (it.isText) {
+                g.fillRound(ic, 7, rgb(GREEN, 0.14f));
+                g.icon(Icon::Text, inset(ic, 6), rgb(GREEN), 2.0f);
+                title = firstLine(it.text);
+                if (title.empty()) title = "(blank text)";
+                bool copied = copiedRowId_ == it.id && now - copiedRowAt_ < 1600;
+                sub = copied ? "Copied to clipboard" : "Note from " + it.device + DOT + "click to copy";
+            } else {
+                g.fileIcon(it.path, ic);
+                PointF b{ic.right - 1, ic.bottom - 1};
+                g.fillCircle(b, 7.5f, rgb(BG));
+                g.fillCircle(b, 6.0f, rgb(GREEN));
+                g.icon(Icon::Drop, rc(b.x - 4.5f, b.y - 4.5f, b.x + 4.5f, b.y + 4.5f), rgb(WHITE), 3.0f);
+                title = it.name;
+                sub = "From " + it.device + DOT + sizeStr(it.size) + (h ? std::string(DOT) + "show in folder" : "");
+            }
+        } else if (i < nr + np) {
+            const std::string& p = paths_[(size_t)(i - nr)];
             g.fileIcon(p, ic);
             title = util::path_leaf(p);
             if (title.empty()) title = p;
@@ -796,7 +873,7 @@ void Ui::paint(Gfx& g) {
                                         : sizeStr(root->bytes);
             else sub = building_ ? "Scanning\xE2\x80\xA6" : "Not found";
         } else {
-            const std::string& t = texts_[(size_t)i - paths_.size()];
+            const std::string& t = texts_[(size_t)(i - nr - np)];
             g.fillRound(ic, 7, rgb(SURF2));
             g.icon(Icon::Text, inset(ic, 6), rgb(ACCTXT), 2.0f);
             title = firstLine(t);
@@ -805,7 +882,7 @@ void Ui::paint(Gfx& g) {
         }
         float textRight = r.right - (h ? 44 : 10);
         g.text(title, rc(ic.right + 12, top + 5, textRight, top + 24), Font::Body, rgb(TEXT));
-        g.text(sub, rc(ic.right + 12, top + 23, textRight, top + 40), Font::Small, rgb(MUTE));
+        g.text(sub, rc(ic.right + 12, top + 23, textRight, top + 40), Font::Small, rgb(i < nr ? 0x8FD9B6 : MUTE));
         if (h) {
             RectF rm = rc(L.list.right - 38, top + 8, L.list.right - 6, top + 36);
             bool hr = hover_.hit == Hit::RowRemove;
@@ -833,6 +910,6 @@ void Ui::paint(Gfx& g) {
     };
     button(L.add, Hit::AddFiles, Icon::Plus, "Add files", true);
     button(L.folder, Hit::AddFolder, Icon::Folder, "Folder", false);
-    if (hasContent) button(L.third, Hit::Third, Icon::Close, "Clear", false);
+    if (rowCount()) button(L.third, Hit::Third, Icon::Close, "Clear", false);
     else button(L.third, Hit::Third, Icon::Clipboard, "Paste", false);
 }

@@ -12,7 +12,7 @@
 
 inline constexpr int DEFAULT_PORT = 47291;
 
-enum class Hit { None, Menu, ModeLocal, ModeAnywhere, Drop, CardButton, Url, Copy, AddFiles, AddFolder, Third, Row, RowRemove };
+enum class Hit { None, Menu, ModeLocal, ModeAnywhere, CardButton, Url, Copy, AddFiles, AddFolder, Third, Row, RowRemove };
 
 struct HitTarget {
     Hit hit = Hit::None;
@@ -20,7 +20,7 @@ struct HitTarget {
     bool operator==(const HitTarget& o) const { return hit == o.hit && index == o.index; }
 };
 
-enum class CardState { DragOver, Empty, TunnelBusy, TunnelMissing, TunnelDownloading, TunnelFailed, NoNetwork, Qr };
+enum class CardState { DragOver, TunnelBusy, TunnelMissing, TunnelDownloading, TunnelFailed, NoNetwork, Qr };
 
 struct Layout {
     float w = 0, h = 0;
@@ -42,7 +42,10 @@ public:
     void mouseDown(float x, float y);
     void mouseUp(float x, float y);
     void wheel(float lines); // positive scrolls toward the top
-    bool wantsPointer() const { return hover_.hit != Hit::None && hover_.hit != Hit::Row; }
+    bool wantsPointer() const {
+        return (hover_.hit != Hit::None && hover_.hit != Hit::Row) ||
+               (hover_.hit == Hit::Row && hover_.index < (int)received_.size());
+    }
 
     void setDragOver(bool on);
     void addPaths(const std::vector<std::string>& list);
@@ -65,19 +68,22 @@ private:
     void removeRow(int index);
     void clearAll();
     void setMode(int m);
-    void newToken();
+    void newLink();
     std::string shareUrl() const;
     void refreshQr();
     void showMenu();
     void onServer(HttpServer::Event ev);
+    void onReceived();
     void updateAnimation();
     void saveSettings();
     void click(const HitTarget& t);
+    bool sharing() const { return !paths_.empty() || !texts_.empty(); }
+    const ReceivedItem& receivedRow(int index) const { return received_[received_.size() - 1 - (size_t)index]; }
 
     Layout layout() const;
     CardState cardState() const;
     HitTarget hitTest(float x, float y) const;
-    int rowCount() const { return (int)(paths_.size() + texts_.size()); }
+    int rowCount() const { return (int)(received_.size() + paths_.size() + texts_.size()); }
     float maxScroll() const;
 
     Shell& shell_;
@@ -85,10 +91,11 @@ private:
     bool started_ = false;
 
     std::vector<std::string> paths_, texts_;
+    std::vector<ReceivedItem> received_; // oldest first; shown newest first
     std::shared_ptr<Bundle> bundle_;
     uint64_t buildSeq_ = 0;
     bool building_ = false;
-    std::string token_;
+    std::string inbox_;
 
     HttpServer server_;
     std::unique_ptr<Tunnel> tunnel_;
@@ -104,6 +111,7 @@ private:
     float scroll_ = 0, spin_ = 0;
     bool dragOver_ = false, animating_ = false;
     uint64_t copiedAt_ = 0, visitAt_ = 0, doneAt_ = 0;
+    uint64_t copiedRowId_ = 0, copiedRowAt_ = 0;
     std::string visitDevice_, doneText_;
     std::vector<TransferInfo> transfers_;
     std::map<uint64_t, Speed> speeds_;
