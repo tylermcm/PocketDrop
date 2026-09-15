@@ -1,0 +1,838 @@
+#include "ui.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace {
+
+const uint32_t BG = 0x0F0F13, SURF = 0x19191F, SURF2 = 0x23232B, SURF3 = 0x2E2E38, LINE = 0x2B2B35,
+               TEXT = 0xF3F3F6, MUTE = 0x9B9BA8, FAINT = 0x6B6B78, ACC = 0x8B7CFF, ACCHI = 0x9D90FF,
+               ACCTXT = 0xC4BBFF, ACC2 = 0x4FC3F7, GREEN = 0x3ECF8E, RED = 0xFF6B6B, AMBER = 0xF5B84B,
+               WHITE = 0xFFFFFF;
+const float M = 16.0f, ROW = 44.0f;
+
+enum MenuId {
+    ID_ADD_FILES = 100,
+    ID_ADD_FOLDER,
+    ID_PASTE,
+    ID_COPY,
+    ID_OPEN_BROWSER,
+    ID_NEW_LINK,
+    ID_BURN,
+    ID_AUTO_ANY,
+    ID_TOPMOST,
+    ID_STOP_TUNNEL,
+    ID_ABOUT,
+    ID_ADDR_BASE = 500,
+};
+
+#ifdef __APPLE__
+const char* PASTE_HINT = "\xE2\x8C\x98V pastes files, text or screenshots"; // ⌘V
+const char* KEY_OPEN = "", *KEY_PASTE = "", *KEY_COPY = "";
+#else
+const char* PASTE_HINT = "Ctrl+V pastes files, text or screenshots";
+const char* KEY_OPEN = "\tCtrl+O", *KEY_PASTE = "\tCtrl+V", *KEY_COPY = "\tCtrl+C";
+#endif
+
+std::string plural(uint64_t n, const char* word) { return std::to_string(n) + " " + word + (n == 1 ? "" : "s"); }
+std::string sizeStr(uint64_t b) { return util::format_size(b); }
+const char* DOT = "  \xC2\xB7  "; // " · "
+
+size_t utf8Length(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) n += (c & 0xC0) != 0x80;
+    return n;
+}
+
+std::string firstLine(const std::string& t) {
+    size_t a = t.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    size_t e = t.find_first_of("\r\n", a);
+    std::string s = t.substr(a, e == std::string::npos ? std::string::npos : e - a);
+    if (s.size() > 240) {
+        size_t cut = 240;
+        while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
+        s.resize(cut);
+    }
+    return s;
+}
+
+void cleanOldPastes() {
+    std::string dir = util::path_join(plat::app_data_dir(), "Pasted");
+    int64_t now = plat::unix_time();
+    for (const auto& e : plat::list_dir(dir))
+        if (!e.st.isDir && now - e.st.mtime > 7 * 24 * 3600) plat::file_remove(util::path_join(dir, e.name));
+}
+
+} // namespace
+
+// ---------------------------------------------------------------- lifecycle
+
+void Ui::post(std::function<void()> fn) {
+    std::weak_ptr<bool> alive = alive_;
+    shell_.post([alive, fn = std::move(fn)] {
+        if (alive.lock()) fn();
+    });
+}
+
+void Ui::start() {
+    started_ = true;
+    mode_ = shell_.loadSetting("Mode", 0) ? 1 : 0;
+    topmost_ = shell_.loadSetting("Topmost", 0) != 0;
+    burnAfter_ = shell_.loadSetting("BurnAfter", 0) != 0;
+    autoAnywhere_ = shell_.loadSetting("AutoAnywhere", 0) != 0;
+
+    tunnel_ = std::make_unique<Tunnel>([this] { post([this] { refreshQr(); updateAnimation(); }); });
+    server_.onEvent = [this](HttpServer::Event e) { post([this, e] { onServer(e); }); };
+    if (!server_.start(DEFAULT_PORT)) shell_.alert("PocketDrop", "PocketDrop couldn't start its local server.");
+    addrs_ = plat::lan_addresses();
+    token_ = util::random_token(16);
+    server_.publish(nullptr, token_);
+    if (topmost_) shell_.setTopmost(true);
+    if (mode_ == 1 || (autoAnywhere_ && !Tunnel::findBinary().empty())) tunnel_->start(server_.port(), false);
+    std::thread(cleanOldPastes).detach();
+    refreshQr();
+    updateAnimation();
+}
+
+void Ui::shutdown() {
+    if (!started_) return;
+    started_ = false;
+    *alive_ = false;
+    alive_ = std::make_shared<bool>(false);
+    saveSettings();
+    shell_.setAnimating(false);
+    if (tunnel_) tunnel_->stop();
+    server_.stop();
+    bundle_.reset();
+}
+
+void Ui::saveSettings() {
+    shell_.saveSetting("Mode", mode_);
+    shell_.saveSetting("Topmost", topmost_);
+    shell_.saveSetting("BurnAfter", burnAfter_);
+    shell_.saveSetting("AutoAnywhere", autoAnywhere_);
+}
+
+// ---------------------------------------------------------------- content
+
+void Ui::addPaths(const std::vector<std::string>& list) {
+    bool changed = false;
+    for (const auto& raw : list) {
+        std::string p = shell_.cleanPath(raw);
+        if (p.empty()) continue;
+        std::string lp = util::lower(p);
+        if (std::any_of(paths_.begin(), paths_.end(), [&](const std::string& q) { return util::lower(q) == lp; }))
+            continue;
+        paths_.push_back(p);
+        changed = true;
+    }
+    if (changed) rebuild();
+}
+
+void Ui::addText(const std::string& text) {
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos) return;
+    if (std::find(texts_.begin(), texts_.end(), text) != texts_.end()) return;
+    texts_.push_back(text);
+    rebuild();
+}
+
+void Ui::removeRow(int index) {
+    if (index < 0 || index >= rowCount()) return;
+    if (index < (int)paths_.size()) paths_.erase(paths_.begin() + index);
+    else texts_.erase(texts_.begin() + (index - (int)paths_.size()));
+    hover_ = {};
+    rebuild();
+    scroll_ = std::min(scroll_, maxScroll());
+}
+
+void Ui::clearAll() {
+    paths_.clear();
+    texts_.clear();
+    scroll_ = 0;
+    rebuild();
+}
+
+void Ui::rebuild() {
+    uint64_t seq = ++buildSeq_;
+    building_ = true;
+    std::weak_ptr<bool> alive = alive_;
+    Shell* shell = &shell_;
+    std::thread([this, seq, alive, shell, p = paths_, t = texts_, prev = bundle_] {
+        std::shared_ptr<Bundle> b = build_bundle(p, t, prev.get());
+        shell->post([this, seq, alive, b] {
+            if (alive.lock()) onBuilt(seq, b);
+        });
+    }).detach();
+    updateAnimation();
+    invalidate();
+}
+
+void Ui::onBuilt(uint64_t seq, std::shared_ptr<Bundle> b) {
+    if (seq != buildSeq_) return;
+    building_ = false;
+    bundle_ = std::move(b);
+    bundle_->startPrepare([this] { post([this] { updateAnimation(); invalidate(); }); });
+    server_.publish(bundle_, token_);
+    refreshQr();
+    updateAnimation();
+    invalidate();
+}
+
+void Ui::paste() {
+    std::vector<std::string> list;
+    std::string text;
+    shell_.readClipboard(list, text);
+    if (!list.empty()) addPaths(list);
+    else if (!text.empty()) addText(text);
+}
+
+void Ui::browse(bool folders) {
+    shell_.browse(folders, [this, alive = std::weak_ptr<bool>(alive_)](const std::vector<std::string>& list) {
+        if (alive.lock()) addPaths(list);
+    });
+}
+
+void Ui::setDragOver(bool on) {
+    dragOver_ = on;
+    invalidate();
+}
+
+// ---------------------------------------------------------------- sharing
+
+void Ui::setMode(int m) {
+    mode_ = m;
+    if (m == 1) {
+        auto st = tunnel_->state();
+        if (st == Tunnel::State::Off || st == Tunnel::State::Failed || st == Tunnel::State::Missing)
+            tunnel_->start(server_.port(), false);
+    }
+    saveSettings();
+    refreshQr();
+    updateAnimation();
+}
+
+void Ui::newToken() {
+    token_ = util::random_token(16);
+    server_.publish(bundle_, token_);
+    refreshQr();
+}
+
+std::string Ui::shareUrl() const {
+    if (token_.empty() || !server_.port()) return {};
+    if (mode_ == 1) {
+        if (tunnel_->state() != Tunnel::State::Online) return {};
+        std::string u = tunnel_->url();
+        return u.empty() ? std::string() : u + "/" + token_ + "/";
+    }
+    if (addrs_.empty()) return {};
+    return "http://" + addrs_[(size_t)addrIndex_].ip + ":" + std::to_string(server_.port()) + "/" + token_ + "/";
+}
+
+void Ui::refreshQr() {
+    std::string s = shareUrl();
+    if (s != qrText_) {
+        qrText_ = s;
+        qr_ = s.empty() ? qr::Code{} : qr::encode(s, qr::Ecc::M);
+    }
+    invalidate();
+}
+
+void Ui::refreshNetwork() {
+    addrs_ = plat::lan_addresses();
+    if (addrIndex_ >= (int)addrs_.size()) addrIndex_ = 0;
+    refreshQr();
+}
+
+void Ui::copyLink() {
+    if (qrText_.empty()) return;
+    shell_.copyText(qrText_);
+    copiedAt_ = plat::tick_ms();
+    invalidate();
+}
+
+void Ui::onServer(HttpServer::Event ev) {
+    uint64_t now = plat::tick_ms();
+    switch (ev) {
+    case HttpServer::Event::Visit:
+        visitAt_ = now;
+        visitDevice_ = server_.lastDevice();
+        break;
+    case HttpServer::Event::TransferStart: transfers_ = server_.transfers(); break;
+    case HttpServer::Event::TransferEnd: {
+        transfers_ = server_.transfers();
+        bool burn = false;
+        for (const auto& t : transfers_) {
+            if (!t.done || ended_.count(t.id)) continue;
+            ended_.insert(t.id);
+            if (!t.ok) continue;
+            doneText_ = "Sent " + t.name + " to " + t.device;
+            doneAt_ = now;
+            burn = burnAfter_;
+        }
+        if (burn) newToken();
+        break;
+    }
+    }
+    updateAnimation();
+    invalidate();
+}
+
+void Ui::tick() {
+    uint64_t now = plat::tick_ms();
+    spin_ += 0.2f;
+    if (spin_ > 6.2832f) spin_ -= 6.2832f;
+    bool anyActive = std::any_of(transfers_.begin(), transfers_.end(), [](const TransferInfo& t) { return !t.done; });
+    if (anyActive) {
+        transfers_ = server_.transfers();
+        for (const auto& t : transfers_) {
+            if (t.done) continue;
+            Speed& sp = speeds_[t.id];
+            if (!sp.tick) {
+                sp.sent = t.sent;
+                sp.tick = now;
+            } else if (now - sp.tick >= 400) {
+                double inst = (double)(t.sent - sp.sent) * 1000.0 / (double)(now - sp.tick);
+                sp.bps = sp.bps > 0 ? sp.bps * 0.6 + inst * 0.4 : inst;
+                sp.sent = t.sent;
+                sp.tick = now;
+            }
+        }
+    }
+    bool recent = (copiedAt_ && now - copiedAt_ < 2500) || (doneAt_ && now - doneAt_ < 7000) ||
+                  (visitAt_ && now - visitAt_ < 125000);
+    updateAnimation();
+    if (animating_ || recent) invalidate();
+}
+
+void Ui::updateAnimation() {
+    auto st = tunnel_ ? tunnel_->state() : Tunnel::State::Off;
+    bool busy = building_ || (bundle_ && !bundle_->ready) || st == Tunnel::State::Starting ||
+                st == Tunnel::State::Downloading ||
+                std::any_of(transfers_.begin(), transfers_.end(), [](const TransferInfo& t) { return !t.done; });
+    if (busy != animating_) {
+        animating_ = busy;
+        shell_.setAnimating(busy);
+        invalidate();
+    }
+}
+
+// ---------------------------------------------------------------- input
+
+void Ui::mouseMove(float x, float y) {
+    HitTarget t = hitTest(x, y);
+    if (!(t == hover_)) {
+        hover_ = t;
+        invalidate();
+    }
+}
+
+void Ui::mouseLeave() {
+    hover_ = {};
+    invalidate();
+}
+
+void Ui::mouseDown(float x, float y) { pressed_ = hitTest(x, y); }
+
+void Ui::mouseUp(float x, float y) {
+    HitTarget t = hitTest(x, y), p = pressed_;
+    pressed_ = {};
+    if (t == p && t.hit != Hit::None) click(t);
+    invalidate();
+}
+
+void Ui::wheel(float lines) {
+    scroll_ = std::clamp(scroll_ - lines * ROW, 0.0f, maxScroll());
+    invalidate();
+}
+
+void Ui::click(const HitTarget& t) {
+    switch (t.hit) {
+    case Hit::Menu: showMenu(); break;
+    case Hit::ModeLocal: setMode(0); break;
+    case Hit::ModeAnywhere: setMode(1); break;
+    case Hit::Drop: browse(false); break;
+    case Hit::CardButton:
+        tunnel_->start(server_.port(), cardState() == CardState::TunnelMissing);
+        updateAnimation();
+        break;
+    case Hit::Url:
+        if (!qrText_.empty()) shell_.openUrl(qrText_);
+        break;
+    case Hit::Copy: copyLink(); break;
+    case Hit::AddFiles: browse(false); break;
+    case Hit::AddFolder: browse(true); break;
+    case Hit::Third:
+        if (rowCount()) clearAll();
+        else paste();
+        break;
+    case Hit::RowRemove: removeRow(t.index); break;
+    default: break;
+    }
+    invalidate();
+}
+
+void Ui::showMenu() {
+    auto item = [](int id, std::string label, bool checked = false, bool enabled = true) {
+        MenuItem m;
+        m.id = id;
+        m.label = std::move(label);
+        m.checked = checked;
+        m.enabled = enabled;
+        return m;
+    };
+    MenuItem sep;
+    sep.separator = true;
+    bool hasLink = !qrText_.empty();
+
+    std::vector<MenuItem> items = {
+        item(ID_ADD_FILES, std::string("Add files\xE2\x80\xA6") + KEY_OPEN),
+        item(ID_ADD_FOLDER, "Add folder\xE2\x80\xA6"),
+        item(ID_PASTE, std::string("Paste") + KEY_PASTE),
+        sep,
+        item(ID_COPY, std::string("Copy link") + KEY_COPY, false, hasLink),
+        item(ID_OPEN_BROWSER, "Open link in browser", false, hasLink),
+        item(ID_NEW_LINK, "New link (old one stops working)"),
+    };
+    MenuItem net;
+    net.label = "Network address";
+    if (addrs_.empty()) net.submenu.push_back(item(0, "No networks found", false, false));
+    for (size_t i = 0; i < addrs_.size() && i < 32; i++)
+        net.submenu.push_back(item(ID_ADDR_BASE + (int)i, addrs_[i].ip + "   " + addrs_[i].adapter, (int)i == addrIndex_));
+    items.push_back(net);
+    items.push_back(sep);
+    items.push_back(item(ID_BURN, "Stop sharing after a download", burnAfter_));
+    items.push_back(item(ID_AUTO_ANY, "Keep Anywhere tunnel ready", autoAnywhere_));
+    items.push_back(item(ID_TOPMOST, "Always on top", topmost_));
+    for (auto& extra : shell_.extraMenuItems()) items.push_back(extra);
+    if (tunnel_->state() != Tunnel::State::Off && tunnel_->state() != Tunnel::State::Missing)
+        items.push_back(item(ID_STOP_TUNNEL, "Close Anywhere tunnel"));
+    items.push_back(sep);
+    items.push_back(item(ID_ABOUT, "About PocketDrop"));
+
+    Layout L = layout();
+    int cmd = shell_.popupMenu(items, L.menu.right, L.menu.bottom + 4);
+    switch (cmd) {
+    case 0: break;
+    case ID_ADD_FILES: browse(false); break;
+    case ID_ADD_FOLDER: browse(true); break;
+    case ID_PASTE: paste(); break;
+    case ID_COPY: copyLink(); break;
+    case ID_OPEN_BROWSER:
+        if (hasLink) shell_.openUrl(qrText_);
+        break;
+    case ID_NEW_LINK: newToken(); break;
+    case ID_BURN: burnAfter_ = !burnAfter_; break;
+    case ID_AUTO_ANY:
+        autoAnywhere_ = !autoAnywhere_;
+        if (autoAnywhere_ && tunnel_->state() == Tunnel::State::Off && !Tunnel::findBinary().empty())
+            tunnel_->start(server_.port(), false);
+        break;
+    case ID_TOPMOST:
+        topmost_ = !topmost_;
+        shell_.setTopmost(topmost_);
+        break;
+    case ID_STOP_TUNNEL:
+        tunnel_->stop();
+        if (mode_ == 1) setMode(0);
+        break;
+    case ID_ABOUT:
+        shell_.alert("About PocketDrop",
+                     "PocketDrop 1.0\n\nDrop files, scan the QR code, and they download straight to your phone. No app "
+                     "or account needed on the phone.\n\nSame Wi-Fi: direct transfer over your local network (port " +
+                         std::to_string(server_.port()) +
+                         ").\nAnywhere: a Cloudflare quick tunnel (cloudflared) so phones on mobile data can connect "
+                         "too.\n\nLinks use a random 128-bit token and stop working when PocketDrop closes.");
+        break;
+    default:
+        if (cmd >= ID_ADDR_BASE && cmd < ID_ADDR_BASE + (int)addrs_.size()) {
+            addrIndex_ = cmd - ID_ADDR_BASE;
+            refreshQr();
+        } else if (cmd >= 1000) {
+            shell_.handleExtraMenu(cmd);
+        }
+        break;
+    }
+    saveSettings();
+    updateAnimation();
+    invalidate();
+}
+
+// ---------------------------------------------------------------- layout
+
+Layout Ui::layout() const {
+    Layout L;
+    shell_.clientSize(L.w, L.h);
+    float w = L.w;
+    L.logo = rc(M, 16, M + 26, 42);
+    L.title = rc(M + 36, 12, w - M - 40, 46);
+    L.menu = rc(w - M - 32, 13, w - M, 45);
+    L.seg = rc(M, 56, w - M, 92);
+    float mid = std::floor((L.seg.left + L.seg.right) / 2);
+    L.segLocal = rc(L.seg.left, L.seg.top, mid, L.seg.bottom);
+    L.segAny = rc(mid, L.seg.top, L.seg.right, L.seg.bottom);
+
+    const float cardTop = 104;
+    float size = w - 2 * M;
+    float reserved = 12 + 36 + 8 + 22 + 8 + ROW * 2 + 10 + 36 + 12;
+    size = std::min(size, std::max(180.0f, L.h - cardTop - reserved));
+    float cardLeft = std::floor((w - size) / 2);
+    L.card = rc(cardLeft, cardTop, cardLeft + size, cardTop + size);
+    float cx = (L.card.left + L.card.right) / 2, by = L.card.top + size * 0.72f;
+    L.cardButton = rc(cx - 108, by, cx + 108, by + 38);
+
+    float y = L.card.bottom + 12;
+    L.link = rc(M, y, w - M, y + 36);
+    L.copy = rc(L.link.right - 76, y + 4, L.link.right - 4, y + 32);
+    L.url = rc(L.link.left + 12, y, L.copy.left - 8, y + 36);
+    y += 44;
+    L.info = rc(M + 2, y, w - M - 2, y + 22);
+    y += 30;
+    float bottomTop = L.h - 48;
+    L.list = rc(M, y, w - M, bottomTop - 10);
+    float bw = w - 2 * M, gap = 8, addW = std::floor(bw * 0.40f), other = std::floor((bw - addW - 2 * gap) / 2);
+    L.add = rc(M, bottomTop, M + addW, bottomTop + 36);
+    L.folder = rc(L.add.right + gap, bottomTop, L.add.right + gap + other, bottomTop + 36);
+    L.third = rc(L.folder.right + gap, bottomTop, w - M, bottomTop + 36);
+    return L;
+}
+
+CardState Ui::cardState() const {
+    if (dragOver_) return CardState::DragOver;
+    if (paths_.empty() && texts_.empty()) return CardState::Empty;
+    if (mode_ == 1) {
+        switch (tunnel_->state()) {
+        case Tunnel::State::Online: break;
+        case Tunnel::State::Missing: return CardState::TunnelMissing;
+        case Tunnel::State::Downloading: return CardState::TunnelDownloading;
+        case Tunnel::State::Failed: return CardState::TunnelFailed;
+        default: return CardState::TunnelBusy;
+        }
+    } else if (addrs_.empty()) {
+        return CardState::NoNetwork;
+    }
+    return qr_.size ? CardState::Qr : CardState::TunnelBusy;
+}
+
+float Ui::maxScroll() const {
+    Layout L = layout();
+    return std::max(0.0f, rowCount() * ROW - (L.list.bottom - L.list.top));
+}
+
+HitTarget Ui::hitTest(float x, float y) const {
+    Layout L = layout();
+    if (inside(L.menu, x, y)) return {Hit::Menu};
+    if (inside(L.segLocal, x, y)) return {Hit::ModeLocal};
+    if (inside(L.segAny, x, y)) return {Hit::ModeAnywhere};
+    if (inside(L.card, x, y)) {
+        CardState cs = cardState();
+        if (cs == CardState::Empty) return {Hit::Drop};
+        if ((cs == CardState::TunnelMissing || cs == CardState::TunnelFailed) && inside(L.cardButton, x, y))
+            return {Hit::CardButton};
+        return {};
+    }
+    if (!qrText_.empty() && inside(L.copy, x, y)) return {Hit::Copy};
+    if (!qrText_.empty() && inside(L.url, x, y)) return {Hit::Url};
+    if (inside(L.list, x, y)) {
+        int i = (int)std::floor((y - L.list.top + scroll_) / ROW);
+        if (i < 0 || i >= rowCount()) return {};
+        float top = L.list.top + i * ROW - scroll_;
+        RectF rm = rc(L.list.right - 38, top + 8, L.list.right - 6, top + 36);
+        return {inside(rm, x, y) ? Hit::RowRemove : Hit::Row, i};
+    }
+    if (inside(L.add, x, y)) return {Hit::AddFiles};
+    if (inside(L.folder, x, y)) return {Hit::AddFolder};
+    if (inside(L.third, x, y)) return {Hit::Third};
+    return {};
+}
+
+// ---------------------------------------------------------------- painting
+
+void Ui::paint(Gfx& g) {
+    Layout L = layout();
+    uint64_t now = plat::tick_ms();
+    bool hasContent = rowCount() > 0;
+    auto hov = [&](Hit h) { return hover_.hit == h; };
+    g.clear(rgb(BG));
+
+    // ---- Header
+    g.gradientRound(L.logo, 8, rgb(ACC), rgb(ACC2));
+    g.icon(Icon::Drop, inset(L.logo, 5), rgb(WHITE), 2.6f);
+
+    const TransferInfo* active = nullptr;
+    for (const auto& t : transfers_)
+        if (!t.done) active = &t;
+    std::string status;
+    uint32_t dot;
+    if (mode_ == 1 && tunnel_->state() == Tunnel::State::Failed) {
+        status = "Offline";
+        dot = RED;
+    } else if (active) {
+        status = "Sending";
+        dot = ACC;
+    } else if (visitAt_ && now - visitAt_ < 120000) {
+        status = visitDevice_ + " connected";
+        dot = GREEN;
+    } else if (hasContent && !qrText_.empty()) {
+        status = "Live";
+        dot = GREEN;
+    } else {
+        status = "Idle";
+        dot = FAINT;
+    }
+    float tw = g.measure(status, Font::SmallBold);
+    RectF pill = rc(L.menu.left - 8 - tw - 30, 17, L.menu.left - 8, 41);
+    g.text("PocketDrop", rc(L.title.left, L.title.top, pill.left - 6, L.title.bottom), Font::Title, rgb(TEXT));
+    g.fillRound(pill, 12, rgb(SURF));
+    g.fillCircle({pill.left + 13, 29}, 3.5f, rgb(dot));
+    g.text(status, rc(pill.left + 22, pill.top, pill.right - 8, pill.bottom), Font::SmallBold, rgb(MUTE));
+    if (hov(Hit::Menu)) g.fillRound(L.menu, 8, rgb(SURF2));
+    g.icon(Icon::Dots, inset(L.menu, 7), rgb(hov(Hit::Menu) ? TEXT : MUTE));
+
+    // ---- Mode switch
+    g.fillRound(L.seg, 11, rgb(SURF));
+    g.fillRound(inset(mode_ == 0 ? L.segLocal : L.segAny, 3), 8, rgb(SURF3));
+    auto segment = [&](const RectF& r, Icon ic, const char* label, bool selected, bool hovered, uint32_t badge) {
+        float lw = g.measure(label, Font::BodyBold), total = 16 + 7 + lw;
+        float x = std::floor((r.left + r.right - total) / 2), cy = (r.top + r.bottom) / 2;
+        uint32_t col = selected ? TEXT : hovered ? 0xCFCFD8 : MUTE;
+        g.icon(ic, rc(x, cy - 8, x + 16, cy + 8), rgb(col), 2.0f);
+        g.text(label, rc(x + 23, r.top, x + total + 4, r.bottom), Font::BodyBold, rgb(col));
+        if (badge) g.fillCircle({x + total + 10, cy - 5}, 3.2f, rgb(badge));
+    };
+    uint32_t anyBadge = 0;
+    switch (tunnel_->state()) {
+    case Tunnel::State::Online: anyBadge = GREEN; break;
+    case Tunnel::State::Starting:
+    case Tunnel::State::Downloading: anyBadge = AMBER; break;
+    case Tunnel::State::Failed: anyBadge = RED; break;
+    default: break;
+    }
+    segment(L.segLocal, Icon::Wifi, "Same Wi-Fi", mode_ == 0, hov(Hit::ModeLocal), 0);
+    segment(L.segAny, Icon::Globe, "Anywhere", mode_ == 1, hov(Hit::ModeAnywhere), anyBadge);
+
+    // ---- Card
+    const RectF& c = L.card;
+    float cx = (c.left + c.right) / 2, cy = (c.top + c.bottom) / 2, cw = c.right - c.left;
+    auto centered = [&](const std::string& s, float y, Font f, uint32_t col, float h = 22) {
+        g.text(s, rc(c.left + 14, y, c.right - 14, y + h), f, rgb(col), Align::Center);
+    };
+    auto cardButton = [&](const std::string& label, bool primary) {
+        bool h = hov(Hit::CardButton);
+        g.fillRound(L.cardButton, 10, rgb(primary ? (h ? ACCHI : ACC) : (h ? SURF3 : SURF2)));
+        g.text(label, L.cardButton, Font::BodyBold, rgb(primary ? WHITE : TEXT), Align::Center);
+    };
+    switch (cardState()) {
+    case CardState::DragOver:
+        g.fillRound(c, 20, rgb(ACC, 0.10f));
+        g.strokeRound(c, 20, rgb(ACC), 2.0f, true);
+        g.fillCircle({cx, cy - 30}, 36, rgb(ACC, 0.16f));
+        g.icon(Icon::Drop, rc(cx - 18, cy - 48, cx + 18, cy - 12), rgb(ACCTXT), 2.0f);
+        centered("Drop to share", cy + 20, Font::Big, TEXT, 28);
+        break;
+    case CardState::Empty: {
+        bool h = hov(Hit::Drop);
+        g.fillRound(c, 20, rgb(h ? 0x1C1C24 : SURF));
+        g.strokeRound(c, 20, rgb(h ? FAINT : LINE), 1.5f, true);
+        g.fillCircle({cx, cy - 42}, 34, rgb(SURF2));
+        g.icon(Icon::Drop, rc(cx - 17, cy - 59, cx + 17, cy - 25), rgb(ACCTXT), 2.0f);
+        centered("Drop files here", cy + 8, Font::Big, TEXT, 28);
+        centered("or click to browse", cy + 38, Font::Body, MUTE);
+        centered(PASTE_HINT, cy + 66, Font::Small, FAINT);
+        break;
+    }
+    case CardState::TunnelBusy:
+        g.fillRound(c, 20, rgb(SURF));
+        g.spinner({cx, cy - 26}, 18, spin_, rgb(ACC), 3.0f);
+        centered("Opening secure tunnel\xE2\x80\xA6", cy + 14, Font::BodyBold, TEXT);
+        centered("Usually takes a few seconds", cy + 38, Font::Small, MUTE);
+        break;
+    case CardState::TunnelMissing:
+        g.fillRound(c, 20, rgb(SURF));
+        g.fillCircle({cx, cy - 76}, 30, rgb(SURF2));
+        g.icon(Icon::Globe, rc(cx - 15, cy - 91, cx + 15, cy - 61), rgb(ACC2), 1.9f);
+        centered("Share beyond your Wi-Fi", cy - 30, Font::Big, TEXT, 28);
+        centered("A free Cloudflare tunnel lets your phone", cy + 4, Font::Small, MUTE, 18);
+        centered("connect over mobile data. No account needed.", cy + 22, Font::Small, MUTE, 18);
+        cardButton(std::string("Enable") + DOT + "one-time 40 MB", true);
+        break;
+    case CardState::TunnelDownloading: {
+        g.fillRound(c, 20, rgb(SURF));
+        int p = std::clamp(tunnel_->progress(), 0, 100);
+        centered("Downloading cloudflared\xE2\x80\xA6", cy - 34, Font::BodyBold, TEXT);
+        RectF bar = rc(c.left + 52, cy - 3, c.right - 52, cy + 3);
+        g.fillRound(bar, 3, rgb(SURF3));
+        g.fillRound(rc(bar.left, bar.top, bar.left + (bar.right - bar.left) * p / 100.0f, bar.bottom), 3, rgb(ACC));
+        centered(std::to_string(p) + "%", cy + 14, Font::Small, MUTE);
+        break;
+    }
+    case CardState::TunnelFailed:
+        g.fillRound(c, 20, rgb(SURF));
+        g.fillCircle({cx, cy - 62}, 28, rgb(RED, 0.14f));
+        g.icon(Icon::Close, rc(cx - 12, cy - 74, cx + 12, cy - 50), rgb(RED), 2.2f);
+        centered("Couldn't open the tunnel", cy - 16, Font::BodyBold, TEXT);
+        centered(tunnel_->message(), cy + 8, Font::Small, MUTE, 18);
+        cardButton("Try again", false);
+        break;
+    case CardState::NoNetwork:
+        g.fillRound(c, 20, rgb(SURF));
+        g.icon(Icon::Wifi, rc(cx - 22, cy - 66, cx + 22, cy - 22), rgb(FAINT), 1.8f);
+        centered("Not connected to a network", cy - 4, Font::BodyBold, TEXT);
+        centered("Join Wi-Fi, or switch to Anywhere", cy + 20, Font::Small, MUTE);
+        break;
+    case CardState::Qr: {
+        g.fillRound(c, 20, rgb(WHITE));
+        float scale = g.scale();
+        float modPx = std::max(1.0f, std::floor(cw * scale / (float)(qr_.size + 7)));
+        float mod = modPx / scale, total = mod * (float)qr_.size;
+        float ox = std::round((cx - total / 2) * scale) / scale, oy = std::round((cy - total / 2) * scale) / scale;
+        g.setAliased(true);
+        for (int y = 0; y < qr_.size; y++) {
+            for (int x = 0; x < qr_.size;) {
+                if (!qr_.dark(x, y)) {
+                    x++;
+                    continue;
+                }
+                int x0 = x;
+                while (x < qr_.size && qr_.dark(x, y)) x++;
+                g.fillRect(rc(ox + x0 * mod, oy + y * mod, ox + x * mod, oy + (y + 1) * mod), rgb(0x111116));
+            }
+        }
+        g.setAliased(false);
+        break;
+    }
+    }
+
+    // ---- Link row
+    g.fillRound(L.link, 10, rgb(SURF));
+    if (!qrText_.empty()) {
+        std::string u = qrText_;
+        for (const char* scheme : {"https://", "http://"})
+            if (u.rfind(scheme, 0) == 0) u.erase(0, strlen(scheme));
+        g.text(u, L.url, Font::Mono, rgb(hov(Hit::Url) ? TEXT : MUTE));
+        bool copied = copiedAt_ && now - copiedAt_ < 1600;
+        g.fillRound(L.copy, 7, rgb(copied ? GREEN : ACC, hov(Hit::Copy) ? 0.30f : 0.18f));
+        const char* label = copied ? "Copied" : "Copy";
+        float lw = g.measure(label, Font::SmallBold), total = 14 + 6 + lw;
+        float x = std::floor((L.copy.left + L.copy.right - total) / 2), ly = (L.copy.top + L.copy.bottom) / 2;
+        uint32_t col = copied ? GREEN : ACCTXT;
+        g.icon(copied ? Icon::Check : Icon::Copy, rc(x, ly - 7, x + 14, ly + 7), rgb(col), 2.0f);
+        g.text(label, rc(x + 20, L.copy.top, x + total + 4, L.copy.bottom), Font::SmallBold, rgb(col));
+    } else {
+        const char* msg = mode_ == 1 ? "Link appears once the tunnel is up" : "No network address available";
+        g.text(msg, rc(L.link.left + 12, L.link.top, L.link.right - 12, L.link.bottom), Font::Small, rgb(FAINT));
+    }
+
+    // ---- Info line
+    const RectF& in = L.info;
+    if (active) {
+        double frac = active->total ? (double)active->sent / (double)active->total : 0.0;
+        auto sp = speeds_.find(active->id);
+        std::string right = sp != speeds_.end() && sp->second.bps > 0 ? sizeStr((uint64_t)sp->second.bps) + "/s" : "";
+        float rw = g.measure(right, Font::Small);
+        std::string left = std::to_string((int)(frac * 100)) + "%" + DOT + active->name + "  \xE2\x86\x92  " + active->device;
+        g.text(left, rc(in.left, in.top, in.right - rw - 10, in.bottom), Font::SmallBold, rgb(TEXT));
+        g.text(right, in, Font::Small, rgb(MUTE), Align::Right);
+        RectF bar = rc(in.left, in.bottom + 2, in.right, in.bottom + 4);
+        g.fillRound(bar, 1, rgb(SURF3));
+        g.fillRound(rc(bar.left, bar.top, bar.left + (float)((bar.right - bar.left) * frac), bar.bottom), 1, rgb(ACC));
+    } else if (doneAt_ && now - doneAt_ < 6000) {
+        g.icon(Icon::Check, rc(in.left, in.top + 3, in.left + 16, in.top + 19), rgb(GREEN), 2.2f);
+        g.text(doneText_, rc(in.left + 22, in.top, in.right, in.bottom), Font::SmallBold, rgb(GREEN));
+    } else if (hasContent) {
+        std::string left, right;
+        if (bundle_ && !building_) {
+            if (!bundle_->files.empty()) left = plural(bundle_->files.size(), "file") + DOT + sizeStr(bundle_->totalBytes);
+            if (!texts_.empty()) left += (left.empty() ? "" : DOT) + plural(texts_.size(), "note");
+            if (!bundle_->files.empty()) {
+                if (!bundle_->ready) {
+                    double f = bundle_->totalBytes ? (double)bundle_->prepDone / (double)bundle_->totalBytes : 0.0;
+                    right = "Packing " + std::to_string((int)(std::min(f, 0.99) * 100)) + "%";
+                } else if (bundle_->zipPreferred) {
+                    right = "zip " + sizeStr(bundle_->zipBytes) + (bundle_->deflated ? " \xC2\xB7 compressed" : " \xC2\xB7 stored");
+                } else {
+                    right = "direct download";
+                }
+            }
+        } else {
+            left = "Scanning\xE2\x80\xA6";
+        }
+        float rw = g.measure(right, Font::Small);
+        g.text(left, rc(in.left, in.top, in.right - rw - 10, in.bottom), Font::Small, rgb(MUTE));
+        g.text(right, in, Font::Small, rgb(FAINT), Align::Right);
+    } else {
+        g.text(mode_ == 0 ? "Your phone needs to be on the same network" : "Works over mobile data via Cloudflare", in,
+               Font::Small, rgb(FAINT), Align::Center);
+    }
+
+    // ---- Item list
+    g.pushClip(L.list);
+    int n = rowCount();
+    if (n == 0) {
+        float ty = L.list.top + 18;
+        g.text("Everything you add shows up here.", rc(L.list.left, ty, L.list.right, ty + 20), Font::Small, rgb(FAINT),
+               Align::Center);
+        g.text("The phone page updates live as you add more.", rc(L.list.left, ty + 20, L.list.right, ty + 40),
+               Font::Small, rgb(FAINT), Align::Center);
+    }
+    for (int i = 0; i < n; i++) {
+        float top = L.list.top + i * ROW - scroll_;
+        if (top + ROW < L.list.top || top > L.list.bottom) continue;
+        RectF r = rc(L.list.left, top + 2, L.list.right, top + ROW - 2);
+        bool h = hover_.index == i && (hover_.hit == Hit::Row || hover_.hit == Hit::RowRemove);
+        if (h) g.fillRound(r, 10, rgb(SURF));
+        RectF ic = rc(r.left + 8, top + 8, r.left + 36, top + 36);
+        std::string title, sub;
+        if (i < (int)paths_.size()) {
+            const std::string& p = paths_[(size_t)i];
+            g.fileIcon(p, ic);
+            title = util::path_leaf(p);
+            if (title.empty()) title = p;
+            const BundleRoot* root = nullptr;
+            if (bundle_)
+                for (const auto& br : bundle_->roots)
+                    if (util::lower(br.path) == util::lower(p)) root = &br;
+            if (root) sub = root->isDir ? std::string("Folder") + DOT + plural(root->fileCount, "file") + DOT + sizeStr(root->bytes)
+                                        : sizeStr(root->bytes);
+            else sub = building_ ? "Scanning\xE2\x80\xA6" : "Not found";
+        } else {
+            const std::string& t = texts_[(size_t)i - paths_.size()];
+            g.fillRound(ic, 7, rgb(SURF2));
+            g.icon(Icon::Text, inset(ic, 6), rgb(ACCTXT), 2.0f);
+            title = firstLine(t);
+            if (title.empty()) title = "(blank text)";
+            sub = std::string("Text") + DOT + plural(utf8Length(t), "character");
+        }
+        float textRight = r.right - (h ? 44 : 10);
+        g.text(title, rc(ic.right + 12, top + 5, textRight, top + 24), Font::Body, rgb(TEXT));
+        g.text(sub, rc(ic.right + 12, top + 23, textRight, top + 40), Font::Small, rgb(MUTE));
+        if (h) {
+            RectF rm = rc(L.list.right - 38, top + 8, L.list.right - 6, top + 36);
+            bool hr = hover_.hit == Hit::RowRemove;
+            if (hr) g.fillRound(rm, 8, rgb(SURF3));
+            g.icon(Icon::Close, inset(rm, 9), rgb(hr ? TEXT : MUTE), 2.2f);
+        }
+    }
+    float listH = L.list.bottom - L.list.top;
+    if (n * ROW > listH) {
+        float content = n * ROW, th = std::max(24.0f, listH * listH / content);
+        float ty = L.list.top + (listH - th) * (scroll_ / (content - listH));
+        g.fillRound(rc(L.list.right - 3, ty, L.list.right, ty + th), 1.5f, rgb(SURF3));
+    }
+    g.popClip();
+
+    // ---- Bottom buttons
+    auto button = [&](const RectF& r, Hit hit, Icon ic, const char* label, bool primary) {
+        bool hv = hov(hit);
+        g.fillRound(r, 10, rgb(primary ? (hv ? ACCHI : ACC) : (hv ? SURF3 : SURF2)));
+        float lw = g.measure(label, Font::BodyBold), total = 15 + 7 + lw;
+        float x = std::floor((r.left + r.right - total) / 2), by = (r.top + r.bottom) / 2;
+        uint32_t col = primary ? WHITE : TEXT;
+        g.icon(ic, rc(x, by - 7.5f, x + 15, by + 7.5f), rgb(col), 2.2f);
+        g.text(label, rc(x + 22, r.top, x + total + 4, r.bottom), Font::BodyBold, rgb(col));
+    };
+    button(L.add, Hit::AddFiles, Icon::Plus, "Add files", true);
+    button(L.folder, Hit::AddFolder, Icon::Folder, "Folder", false);
+    if (hasContent) button(L.third, Hit::Third, Icon::Close, "Clear", false);
+    else button(L.third, Hit::Third, Icon::Clipboard, "Paste", false);
+}

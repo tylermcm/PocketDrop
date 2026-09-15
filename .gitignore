@@ -1,0 +1,11 @@
+build/
+dist/
+*.obj
+*.o
+*.res
+*.pdb
+*.ilk
+__pycache__/
+.DS_Store
+.vs/
+.vscode/

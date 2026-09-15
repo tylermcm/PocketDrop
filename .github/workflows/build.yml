@@ -1,0 +1,100 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app
+        run: bash build_mac.sh
+
+      - name: Inspect app
+        run: |
+          lipo -info build/PocketDrop.app/Contents/MacOS/PocketDrop
+          codesign --verify --verbose build/PocketDrop.app
+          ls -la build/PocketDrop.app/Contents/MacOS build/PocketDrop-mac.zip
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install opencv-python-headless pillow
+
+      - name: Build tests
+        run: bash tests/build_tests.sh build/tests
+
+      - name: Core tests (QR, deflate, zip)
+        run: |
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/out"
+          python tests/verify.py gen "$RUNNER_TEMP/src"
+          python tests/server_check.py gen "$RUNNER_TEMP/src"
+          build/tests/core_test "$RUNNER_TEMP/out" "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv"
+          python tests/verify.py check "$RUNNER_TEMP/out" "$RUNNER_TEMP/src"
+
+      - name: HTTP server tests
+        run: |
+          build/tests/server_test 25 "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
+          sleep 2
+          python tests/server_check.py check "$RUNNER_TEMP/src"
+          wait
+
+      - name: Tunnel test (downloads cloudflared)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          build/tests/tunnel_test 90 --download
+          echo "--- cloudflared.log ---"
+          grep -E "PocketDrop\]|Registered|ERR" "$HOME/Library/Application Support/PocketDrop/cloudflared.log" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketDrop-mac
+          path: build/PocketDrop-mac.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app
+        shell: cmd
+        run: build.bat
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install opencv-python-headless pillow
+
+      - name: Build tests
+        shell: cmd
+        run: tests\build_tests.bat build\tests
+
+      - name: Core and HTTP server tests
+        shell: pwsh
+        run: |
+          $src = "$env:RUNNER_TEMP\src"; $out = "$env:RUNNER_TEMP\out"
+          New-Item -ItemType Directory -Force $src, $out | Out-Null
+          python tests/verify.py gen $src
+          python tests/server_check.py gen $src
+          build\tests\core_test.exe $out "$src\Photos Trip" "$src\single.csv"
+          python tests/verify.py check $out $src
+          if ($LASTEXITCODE) { exit 1 }
+          $p = Start-Process -PassThru -NoNewWindow build\tests\server_test.exe -ArgumentList 25, "`"$src\Photos Trip`"", "`"$src\single.csv`""
+          Start-Sleep 2
+          python tests/server_check.py check $src
+          if ($LASTEXITCODE) { exit 1 }
+          $p.WaitForExit(40000) | Out-Null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketDrop-windows
+          path: build/PocketDrop.exe
