@@ -43,6 +43,7 @@ jobs:
           build/tests/server_test 25 "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv" &
           sleep 2
           python tests/server_check.py check "$RUNNER_TEMP/src"
+          node tests/check_page_js.mjs
           wait
 
       - name: Tunnel test (downloads cloudflared)
@@ -91,6 +92,8 @@ jobs:
           $p = Start-Process -PassThru -NoNewWindow build\tests\server_test.exe -ArgumentList 25, "`"$src\Photos Trip`"", "`"$src\single.csv`""
           Start-Sleep 2
           python tests/server_check.py check $src
+          if ($LASTEXITCODE) { exit 1 }
+          node tests/check_page_js.mjs
           if ($LASTEXITCODE) { exit 1 }
           $p.WaitForExit(40000) | Out-Null
 

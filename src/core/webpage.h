@@ -26,6 +26,7 @@ h1{font-size:18px;margin:0;letter-spacing:-.01em}
 .btn.sec{background:transparent;color:var(--text);border:1px solid var(--line);margin-top:8px}
 .btn[aria-disabled=true]{opacity:.6;pointer-events:none}
 .btn svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.photo-note{color:var(--mute);font-size:12.5px;line-height:1.45;margin:10px 4px 0;text-align:center}
 .bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:10px}
 .bar i{display:block;height:100%;background:var(--acc);width:0;transition:width .3s}
 .list{padding:6px}
@@ -76,6 +77,7 @@ const enc=encodeURIComponent;
 const ic=n=>`<svg><use href="#i-${n}"/></svg>`;
 const icons={image:"image",video:"video",audio:"audio",pdf:"pdf",archive:"archive",text:"text",file:"file"};
 const MAX_ROWS=400;
+const IOS=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
 let data=null,timer=0,ended=false,shareFiles=null;
 function fmt(b){const u=["B","KB","MB","GB","TB"];let i=0;while(b>=1024&&i<4){b/=1024;i++}return(i?b.toFixed(b<10?2:b<100?1:0):b)+" "+u[i]}
 const fileUrl=(f,dl)=>`f/${f.i}/${enc(f.name)}${dl?"?dl=1":""}`;
@@ -128,30 +130,34 @@ function render(){
     const single=nf===1&&!m.zip.preferred;
     h+=`<div class="card"><div class="sum"><b>${plural(nf,"file")}</b><span class="sub">${fmt(m.total)}</span></div>`;
     if(single){
-      h+=m.files[0].missing?`<div class="btn" aria-disabled="true">File no longer available</div>`:`<a class="btn" href="${fileUrl(m.files[0],1)}" download>${ic("dl")}Download</a>`;
+      h+=m.files[0].missing?`<div class="btn" aria-disabled="true">File no longer available</div>`:`<a class="btn" href="${fileUrl(m.files[0],1)}" download>${ic("dl")}${IOS?"Save to Files":"Download"}</a>`;
     }else{
-      h+=`<a class="btn" id="zipbtn" href="zip/${enc(m.zip.name)}" download${m.ready?"":' aria-disabled="true"'}>${ic("archive")}<span id="ziplbl">${m.ready?"Download all · "+fmt(m.zip.size):"Packing… "+Math.round(m.prep*100)+"%"}</span></a>`;
+      h+=`<a class="btn" id="zipbtn" href="zip/${enc(m.zip.name)}" download${m.ready?"":' aria-disabled="true"'}>${ic("archive")}<span id="ziplbl">${m.ready?(IOS?"Save ZIP to Files · ":"Download all · ")+fmt(m.zip.size):"Packing… "+Math.round(m.prep*100)+"%"}</span></a>`;
       if(!m.ready)h+=`<div class="bar" id="zipbar"><i style="width:${m.prep*100}%"></i></div>`;
     }
     const media=m.files.filter(f=>(f.kind==="image"||f.kind==="video")&&!f.missing);
     const mb=media.reduce((a,f)=>a+f.size,0);
-    if(window.isSecureContext&&navigator.canShare&&media.length&&media.length<=40&&mb<=400*1048576)
-      h+=`<button class="btn sec" id="share">${ic("share")}<span>Save ${plural(media.length,"item")} to Photos</span></button>`;
+    const canShare=window.isSecureContext&&navigator.share&&navigator.canShare&&media.length&&media.length<=40&&mb<=400*1048576;
+    if(canShare){
+      h+=`<button class="btn sec" id="share">${ic("share")}<span>${IOS?`Save ${plural(media.length,"item")} to Photos`:`Share ${plural(media.length,"media item")}`}</span></button>`;
+      if(IOS)h+=`<div class="photo-note" id="share-note">After preparation, choose Save Image or Save Video in Apple's share sheet.</div>`;
+    }else if(IOS&&media.length){
+      h+=`<div class="photo-note">To add media to Photos, open its thumbnail, tap Share, then choose Save Image or Save Video.</div>`;
+    }
     h+=`</div>`+th+`<div class="card list">`;
     for(const f of m.files.slice(0,MAX_ROWS)){
       const slash=f.path.lastIndexOf("/"),dir=slash>0?f.path.slice(0,slash)+" · ":"";
       const thumb=["image","video","pdf"].includes(f.kind)&&!f.missing?`<img loading="lazy" alt="" src="t/${f.i}" onerror="this.remove()">`:"";
       h+=`<div class="row${f.missing?" miss":""}"><a class="th" href="${fileUrl(f)}" target="_blank" rel="noopener">${ic(icons[f.kind]||"file")}${thumb}</a>`+
         `<a class="meta" href="${fileUrl(f,1)}" download><div class="nm">${esc(f.name)}</div><div class="dt">${esc(dir)}${f.missing?"unavailable":fmt(f.size)}</div></a>`+
-        `<a class="dl" href="${fileUrl(f,1)}" download aria-label="Download ${esc(f.name)}">${ic("dl")}</a></div>`;
+        `<a class="dl" href="${fileUrl(f,1)}" download aria-label="${IOS?"Save to Files":"Download"} ${esc(f.name)}">${ic("dl")}</a></div>`;
     }
     if(nf>MAX_ROWS)h+=`<div class="more">+ ${plural(nf-MAX_ROWS,"more file")} in the zip</div>`;
     h+=`</div>`;
   }else h=th;
   app.innerHTML=h;
   shareFiles=null;
-  const ios=/iPhone|iPad/.test(navigator.userAgent);
-  $("#hint").textContent=nf>1||(m.zip.preferred&&nf)?(ios?"Zips open in the Files app. Tap one to unzip.":"The zip keeps your folder structure."):"";
+  $("#hint").textContent=nf>1||(m.zip.preferred&&nf)?(IOS?"ZIP files are saved in Files. Tap one there to unzip it.":"The zip keeps your folder structure."):"";
 }
 
 async function copyText(t,btn){
@@ -165,7 +171,12 @@ async function copyText(t,btn){
 
 async function share(btn){
   const lbl=btn.querySelector("span");
-  if(shareFiles){try{await navigator.share({files:shareFiles})}catch(e){}return}
+  const note=$("#share-note");
+  if(shareFiles){
+    try{await navigator.share({files:shareFiles})}
+    catch(e){if(e.name!=="AbortError")lbl.textContent="Couldn't open share sheet"}
+    return;
+  }
   const media=data.files.filter(f=>(f.kind==="image"||f.kind==="video")&&!f.missing);
   btn.setAttribute("aria-disabled","true");
   const out=[];
@@ -178,7 +189,13 @@ async function share(btn){
   }catch(e){lbl.textContent="Couldn't prepare files";btn.removeAttribute("aria-disabled");return}
   btn.removeAttribute("aria-disabled");
   if(!navigator.canShare({files:out})){lbl.textContent="Sharing not supported here";return}
-  shareFiles=out;lbl.textContent=`Tap to save ${plural(out.length,"item")}`;
+  shareFiles=out;
+  lbl.textContent=IOS?"Open Share Sheet":`Share ${plural(out.length,"media item")}`;
+  if(note)note.textContent="Choose Save Image or Save Video in the share sheet.";
+  if(navigator.userActivation&&navigator.userActivation.isActive){
+    try{await navigator.share({files:shareFiles})}
+    catch(e){if(e.name!=="AbortError"&&note)note.textContent="Tap Open Share Sheet, then choose Save Image or Save Video."}
+  }
 }
 
 $("#app").addEventListener("click",e=>{

@@ -25,6 +25,7 @@ def check(src):
     r, _ = req(c, T); expect("redirect", r.status == 301 and r.getheader("Location") == T + "/")
     r, body = req(c, T + "/"); expect("page", r.status == 200 and b"PocketDrop" in body, f"{len(body)} bytes")
     expect("page CSP", "default-src 'none'" in (r.getheader("Content-Security-Policy") or ""))
+    expect("iOS save workflow", b"Save to Files" in body and b"Save Image or Save Video" in body)
 
     for _ in range(100):
         r, body = req(c, T + "/api/manifest")
