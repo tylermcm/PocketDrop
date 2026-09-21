@@ -22,7 +22,7 @@ inline bool inside(const RectF& r, float x, float y) { return x >= r.left && x <
 inline RectF inset(const RectF& r, float d) { return {r.left + d, r.top + d, r.right - d, r.bottom - d}; }
 
 enum class Font { Title, Body, BodyBold, Small, SmallBold, Mono, Big, Count };
-enum class Icon { Dots, Plus, Close, Copy, Check, Wifi, Globe, Folder, Drop, Text, Clipboard, Phone, Retry, Bolt };
+enum class Icon { Dots, Plus, Close, Copy, Share, Check, Wifi, Globe, Folder, Drop, Text, Clipboard, Phone, Retry, Bolt };
 enum class Align { Left, Center, Right };
 
 class Gfx {

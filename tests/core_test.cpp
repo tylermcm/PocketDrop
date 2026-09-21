@@ -37,7 +37,12 @@ int main(int argc, char** argv) {
         "HELLO",
         "http://192.168.1.23:53317/Ab3dEf-ghIJkLmNoPqRsTu/",
         "https://quiet-forest-lamp-river.trycloudflare.com/Ab3dEf-ghIJkLmNoPqRsTu/",
+        qr::wifi("PocketDrop-A1B2", "test;pass:word"),
     };
+    if (qs.back() != "WIFI:T:WPA;S:PocketDrop-A1B2;P:test\\;pass\\:word;;") {
+        std::cerr << "Wi-Fi QR escaping failed\n";
+        return 1;
+    }
     for (int len : {90, 160, 300, 600, 1000, 1500}) {
         std::string s;
         for (int i = 0; i < len; i++) s.push_back(printable[rng() % 70]);

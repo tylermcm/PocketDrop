@@ -6,6 +6,16 @@
 namespace qr {
 namespace {
 
+std::string wifiEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\' || c == ';' || c == ',' || c == ':' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
 const int8_t ECC_PER_BLOCK[4][41] = {
     {-1,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30},
     {-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28},
@@ -257,6 +267,10 @@ struct Builder {
 };
 
 } // namespace
+
+std::string wifi(const std::string& ssid, const std::string& passphrase) {
+    return "WIFI:T:WPA;S:" + wifiEscape(ssid) + ";P:" + wifiEscape(passphrase) + ";;";
+}
 
 Code encode(const std::string& s, Ecc minEcc) {
     int e = (int)minEcc;

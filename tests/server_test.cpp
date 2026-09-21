@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
     fast.activeWindowMs = 1500;
     srv.setPolicy(fast);
     srv.setInbox(inbox);
+    srv.setReceiveCode("ABCDEFGH");
     const char* portEnv = getenv("PD_TEST_PORT");
     int port = portEnv && *portEnv ? atoi(portEnv) : 47291;
     if (!srv.start(port, true) || srv.port() != port) {

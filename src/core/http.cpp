@@ -1,6 +1,7 @@
 #include "http.h"
 #include "webpage.h"
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +21,8 @@ struct HttpServer::Session {
     std::string id, device;
     uint64_t lastSeen = 0; // guarded by the server mutex
     int inflight = 0;      // requests in progress
+    bool receiveAuthorized = false;
+    int authFailures = 0;
 };
 
 struct HttpServer::Upload {
@@ -366,9 +369,11 @@ bool tokenMatch(const std::string& a, const char* b, size_t blen) {
     return diff == 0;
 }
 
-std::string manifest(const Bundle* b, int rev) {
+std::string manifest(const Bundle* b, int rev, bool receiveAuth, bool receiveOk) {
     std::string j = "{\"v\":2,\"rev\":" + std::to_string(rev) + ",\"pc\":\"" + util::json_escape(g_pcName) +
-                    "\",\"chunk\":" + std::to_string(UPLOAD_CHUNK);
+                    "\",\"chunk\":" + std::to_string(UPLOAD_CHUNK) +
+                    ",\"receiveAuth\":" + (receiveAuth ? "true" : "false") +
+                    ",\"receiveOk\":" + (receiveOk ? "true" : "false");
     if (!b) return j + ",\"ready\":true,\"prep\":1,\"total\":0,\"files\":[],\"texts\":[],\"zip\":{\"name\":\"\",\"size\":0,\"preferred\":false}}";
     bool ready = b->ready;
     double prep = ready ? 1.0 : b->totalBytes ? std::min(0.99, (double)b->prepDone / (double)b->totalBytes) : 0.0;
@@ -452,6 +457,15 @@ void HttpServer::publish(std::shared_ptr<Bundle> bundle) {
     std::lock_guard<std::mutex> l(mu_);
     bundle_ = std::move(bundle);
     rev_++;
+}
+
+void HttpServer::setReceiveCode(const std::string& code) {
+    std::lock_guard<std::mutex> l(mu_);
+    receiveCode_ = code;
+    for (auto& [id, session] : sessions_) {
+        session->receiveAuthorized = code.empty();
+        session->authFailures = 0;
+    }
 }
 
 std::string HttpServer::token() const {
@@ -786,6 +800,48 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
         rev = rev_;
     }
 
+    if (r.method == "POST" && rest == "/auth") {
+        if (bodyLen > 32) return json(s, 413, "{\"error\":\"code\"}", false);
+        std::string code;
+        if (!readBody(s, buf, bodyLen, [&](const char* p, size_t n) { code.append(p, n); })) return false;
+        code.erase(std::remove_if(code.begin(), code.end(), [](unsigned char c) { return c == '-' || std::isspace(c); }),
+                   code.end());
+        std::transform(code.begin(), code.end(), code.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+        int status = 401;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (receiveCode_.empty()) {
+                session.receiveAuthorized = true;
+                session.authFailures = 0;
+                status = 204;
+            } else if (session.authFailures >= 8) {
+                status = 429;
+            } else if (tokenMatch(receiveCode_, code.data(), code.size())) {
+                session.receiveAuthorized = true;
+                session.authFailures = 0;
+                status = 204;
+            } else if (++session.authFailures >= 8) {
+                status = 429;
+            }
+        }
+        return status == 204 ? simple(s, 204, false, keep)
+                             : json(s, status, status == 429 ? "{\"error\":\"locked\"}" : "{\"error\":\"code\"}", keep);
+    }
+
+    bool receiveRoute = (r.method == "POST" && (rest == "/up" || rest == "/text")) ||
+                        (rest.rfind("/up/", 0) == 0 && (r.method == "PUT" || r.method == "GET" || r.method == "DELETE"));
+    if (receiveRoute) {
+        bool allowed;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            allowed = receiveCode_.empty() || session.receiveAuthorized;
+        }
+        if (!allowed) {
+            if (!drain(s, buf, bodyLen)) return false;
+            return json(s, 401, "{\"error\":\"auth\"}", keep);
+        }
+    }
+
     // ---- phone -> computer
     if (r.method == "POST" && rest == "/up") {
         if (!drain(s, buf, bodyLen)) return false;
@@ -920,7 +976,13 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
     }
 
     if (rest == "/api/manifest") {
-        std::string j = manifest(b.get(), rev);
+        bool receiveAuth, receiveOk;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            receiveAuth = !receiveCode_.empty();
+            receiveOk = !receiveAuth || session.receiveAuthorized;
+        }
+        std::string j = manifest(b.get(), rev, receiveAuth, receiveOk);
         std::string h = header(200, "application/json; charset=utf-8", j.size(), keep, "Cache-Control: no-store\r\n");
         return sendAll(s, head ? h : h + j) && keep;
     }

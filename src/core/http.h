@@ -63,6 +63,7 @@ public:
     bool phoneConnected() const;
 
     void setInbox(const std::string& dir); // where received files are saved
+    void setReceiveCode(const std::string& code); // empty disables phone -> computer authorization
     std::vector<ReceivedItem> takeReceived(); // items that arrived since the last call
 
     std::vector<TransferInfo> transfers() const;
@@ -105,6 +106,7 @@ private:
     std::map<std::string, std::shared_ptr<Session>> sessions_;
     std::map<std::string, std::shared_ptr<Upload>> uploads_;
     std::string inbox_;
+    std::string receiveCode_;
     std::vector<ReceivedItem> received_;
     uint64_t nextReceivedId_ = 1;
     std::set<plat::Sock> clients_;

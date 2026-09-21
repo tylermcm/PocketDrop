@@ -12,7 +12,22 @@
 
 inline constexpr int DEFAULT_PORT = 47291;
 
-enum class Hit { None, Menu, ModeLocal, ModeAnywhere, CardButton, Url, Copy, AddFiles, AddFolder, Third, Row, RowRemove };
+enum class Hit {
+    None,
+    Menu,
+    ModeLocal,
+    ModeOffline,
+    ModeAnywhere,
+    CardButton,
+    Url,
+    Copy,
+    Share,
+    AddFiles,
+    AddFolder,
+    Third,
+    Row,
+    RowRemove
+};
 
 struct HitTarget {
     Hit hit = Hit::None;
@@ -20,11 +35,23 @@ struct HitTarget {
     bool operator==(const HitTarget& o) const { return hit == o.hit && index == o.index; }
 };
 
-enum class CardState { DragOver, TunnelBusy, TunnelMissing, TunnelDownloading, TunnelFailed, NoNetwork, Qr };
+enum class CardState {
+    DragOver,
+    TunnelBusy,
+    TunnelMissing,
+    TunnelDownloading,
+    TunnelFailed,
+    HotspotBusy,
+    BluetoothSetup,
+    HotspotFailed,
+    NoNetwork,
+    Qr
+};
 
 struct Layout {
     float w = 0, h = 0;
-    RectF logo, title, menu, seg, segLocal, segAny, card, cardButton, link, url, copy, info, list, add, folder, third;
+    RectF logo, title, menu, seg, segLocal, segOffline, segAny, card, cardButton, link, url, copy, share, info, list, add,
+        folder, third;
 };
 
 class Ui {
@@ -53,6 +80,7 @@ public:
     void paste();
     void browse(bool folders);
     void copyLink();
+    void shareLink();
     void refreshNetwork();
 
 private:
@@ -69,6 +97,7 @@ private:
     void clearAll();
     void setMode(int m);
     void newLink();
+    void rotateReceiveCode();
     std::string shareUrl() const;
     void refreshQr();
     void showMenu();
@@ -99,10 +128,12 @@ private:
 
     HttpServer server_;
     std::unique_ptr<Tunnel> tunnel_;
+    std::unique_ptr<plat::Hotspot> hotspot_;
     std::vector<plat::LanAddr> addrs_;
     int addrIndex_ = 0;
-    int mode_ = 0; // 0 = same Wi-Fi, 1 = anywhere
+    int mode_ = 0; // 0 = same Wi-Fi, 1 = anywhere, 2 = offline hotspot
     std::string qrText_;
+    std::string receiveCode_;
     qr::Code qr_;
 
     bool topmost_ = false, burnAfter_ = false, autoAnywhere_ = false;

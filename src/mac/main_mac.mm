@@ -2,6 +2,7 @@
 #import <AppKit/AppKit.h>
 #include "../ui/ui.h"
 #include "gfx_cg.h"
+#include <cstring>
 
 class MacShell;
 
@@ -136,6 +137,33 @@ public:
         if (NSURL* u = [NSURL URLWithString:s2ns(url)]) [[NSWorkspace sharedWorkspace] openURL:u];
     }
 
+    bool copyImage(const std::vector<uint8_t>& rgba, int width, int height) override {
+        if (width <= 0 || height <= 0 || rgba.size() != (size_t)width * height * 4) return false;
+        NSBitmapImageRep* rep = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:nil
+                          pixelsWide:width
+                          pixelsHigh:height
+                       bitsPerSample:8
+                     samplesPerPixel:4
+                            hasAlpha:YES
+                            isPlanar:NO
+                      colorSpaceName:NSCalibratedRGBColorSpace
+                         bytesPerRow:width * 4
+                        bitsPerPixel:32];
+        if (!rep) return false;
+        memcpy(rep.bitmapData, rgba.data(), rgba.size());
+        NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
+        [image addRepresentation:rep];
+        NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+        [pasteboard clearContents];
+        return [pasteboard writeObjects:@[ image ]] == YES;
+    }
+
+    void shareText(const std::string&, const std::string& text) override {
+        NSSharingServicePicker* picker = [[NSSharingServicePicker alloc] initWithItems:@[ s2ns(text) ]];
+        [picker showRelativeToRect:view.bounds ofView:view preferredEdge:NSMaxYEdge];
+    }
+
     void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
         NSOpenPanel* panel = [NSOpenPanel openPanel];
         panel.canChooseFiles = NO;
@@ -171,6 +199,20 @@ public:
         a.messageText = s2ns(title);
         a.informativeText = s2ns(message);
         [a runModal];
+    }
+
+    bool confirmAnywhereRisk(bool& dontShowAgain) override {
+        NSAlert* a = [NSAlert new];
+        a.alertStyle = NSAlertStyleWarning;
+        a.messageText = @"Anyone with this link can download the shared files";
+        a.informativeText = @"The link remains active until it expires, you create a new link, leave Anywhere mode, or close PocketDrop. Sending files back to this Mac is protected by a separate receive code shown only in PocketDrop.";
+        [a addButtonWithTitle:@"Continue"];
+        [a addButtonWithTitle:@"Cancel"];
+        a.showsSuppressionButton = YES;
+        a.suppressionButton.title = @"Don't show this warning again";
+        NSModalResponse response = [a runModal];
+        dontShowAgain = a.suppressionButton.state == NSControlStateValueOn;
+        return response == NSAlertFirstButtonReturn;
     }
 
     int loadSetting(const char* key, int def) override {

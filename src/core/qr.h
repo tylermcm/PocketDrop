@@ -17,4 +17,7 @@ struct Code {
 // costs no extra modules. Returns size == 0 if the data is too long.
 Code encode(const std::string& data, Ecc minEcc = Ecc::M);
 
+// Payload understood by phone cameras as a request to join a WPA/WPA2 network.
+std::string wifi(const std::string& ssid, const std::string& passphrase);
+
 }

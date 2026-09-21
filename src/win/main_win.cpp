@@ -1,11 +1,14 @@
 // Windows host: window, message loop, drag & drop, and the Shell services the shared UI uses.
 #include "gfx_d2d.h"
 #include "../ui/ui.h"
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <windowsx.h>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
+#include <winrt/Windows.Foundation.h>
 #include <algorithm>
 
 namespace {
@@ -122,6 +125,9 @@ class WinShell : public Shell {
 public:
     HWND hwnd = nullptr;
     float dpi = 96.0f;
+    winrt::Windows::ApplicationModel::DataTransfer::DataTransferManager shareManager{nullptr};
+    winrt::event_token shareToken{};
+    bool shareHooked = false;
 
     void invalidate() override { InvalidateRect(hwnd, nullptr, FALSE); }
     void setAnimating(bool on) override {
@@ -150,6 +156,48 @@ public:
             if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
         }
         CloseClipboard();
+    }
+
+    bool copyImage(const std::vector<uint8_t>& rgba, int width, int height) override {
+        if (width <= 0 || height <= 0 || rgba.size() != (size_t)width * height * 4) return false;
+        size_t pixels = (size_t)width * height * 4;
+        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPV5HEADER) + pixels);
+        if (!mem) return false;
+        auto* base = (uint8_t*)GlobalLock(mem);
+        if (!base) {
+            GlobalFree(mem);
+            return false;
+        }
+        BITMAPV5HEADER header{};
+        header.bV5Size = sizeof header;
+        header.bV5Width = width;
+        header.bV5Height = -height;
+        header.bV5Planes = 1;
+        header.bV5BitCount = 32;
+        header.bV5Compression = BI_BITFIELDS;
+        header.bV5RedMask = 0x00FF0000;
+        header.bV5GreenMask = 0x0000FF00;
+        header.bV5BlueMask = 0x000000FF;
+        header.bV5AlphaMask = 0xFF000000;
+        header.bV5CSType = LCS_sRGB;
+        memcpy(base, &header, sizeof header);
+        uint8_t* out = base + sizeof header;
+        for (size_t i = 0; i < pixels; i += 4) {
+            out[i] = rgba[i + 2];
+            out[i + 1] = rgba[i + 1];
+            out[i + 2] = rgba[i];
+            out[i + 3] = rgba[i + 3];
+        }
+        GlobalUnlock(mem);
+        if (!OpenClipboard(hwnd)) {
+            GlobalFree(mem);
+            return false;
+        }
+        EmptyClipboard();
+        bool ok = SetClipboardData(CF_DIBV5, mem) != nullptr;
+        CloseClipboard();
+        if (!ok) GlobalFree(mem);
+        return ok;
     }
 
     void readClipboard(std::vector<std::string>& paths, std::string& text) override {
@@ -196,6 +244,33 @@ public:
         ShellExecuteW(hwnd, L"open", wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
+    void openBluetoothSetup() override {
+        ShellExecuteW(hwnd, L"open", L"explorer.exe", L"shell:::{A8A91A66-3A7D-4424-8D24-04E180695C7A}",
+                      nullptr, SW_SHOWNORMAL);
+    }
+
+    void shareText(const std::string& title, const std::string& text) override {
+        using namespace winrt::Windows::ApplicationModel::DataTransfer;
+        try {
+            if (shareHooked && shareManager) shareManager.DataRequested(shareToken);
+            auto interop = winrt::get_activation_factory<DataTransferManager, IDataTransferManagerInterop>();
+            DataTransferManager manager{nullptr};
+            winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<DataTransferManager>(), winrt::put_abi(manager)));
+            shareManager = manager;
+            shareToken = shareManager.DataRequested([title, text](auto const&, DataRequestedEventArgs const& args) {
+                auto data = args.Request().Data();
+                data.Properties().Title(winrt::to_hstring(title));
+                data.SetText(winrt::to_hstring(text));
+                data.SetWebLink(winrt::Windows::Foundation::Uri(winrt::to_hstring(text)));
+            });
+            shareHooked = true;
+            winrt::check_hresult(interop->ShowShareUIForWindow(hwnd));
+        } catch (...) {
+            copyText(text);
+            alert("PocketDrop", "The Windows share sheet couldn't open, so the link was copied instead.");
+        }
+    }
+
     void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
         ComPtr<IFileOpenDialog> d;
         if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
@@ -239,6 +314,34 @@ public:
 
     void alert(const std::string& title, const std::string& message) override {
         MessageBoxW(hwnd, wide(message).c_str(), wide(title).c_str(), MB_ICONINFORMATION);
+    }
+
+    bool confirmAnywhereRisk(bool& dontShowAgain) override {
+        TASKDIALOG_BUTTON proceed{IDOK, L"Continue"};
+        TASKDIALOGCONFIG config{sizeof config};
+        config.hwndParent = hwnd;
+        config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+        config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        config.pszWindowTitle = L"PocketDrop";
+        config.pszMainIcon = TD_WARNING_ICON;
+        config.pszMainInstruction = L"Anyone with this link can download the shared files";
+        config.pszContent =
+            L"The link remains active until it expires, you create a new link, leave Anywhere mode, or close "
+            L"PocketDrop. Sending files back to this PC is protected by a separate receive code shown only in "
+            L"PocketDrop.";
+        config.cButtons = 1;
+        config.pButtons = &proceed;
+        config.nDefaultButton = IDOK;
+        config.pszVerificationText = L"Don't show this warning again";
+        int pressed = IDCANCEL;
+        BOOL checked = FALSE;
+        if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, &checked))) {
+            dontShowAgain = false;
+            return MessageBoxW(hwnd, config.pszContent, config.pszMainInstruction,
+                               MB_OKCANCEL | MB_ICONWARNING) == IDOK;
+        }
+        dontShowAgain = checked != FALSE;
+        return pressed == IDOK;
     }
 
     int loadSetting(const char* key, int def) override {

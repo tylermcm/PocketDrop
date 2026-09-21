@@ -50,6 +50,8 @@ h1{font-size:18px;margin:0;letter-spacing:-.01em}
 .send-top{margin:0 2px 14px}.send-top b{font-size:17px;display:block}
 #pick{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:0}
 textarea{display:block;width:100%;min-height:104px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:12px;margin:12px 0 8px;resize:vertical}
+.code{display:block;width:100%;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:600 21px/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em;text-align:center;text-transform:uppercase;padding:14px;margin:12px 0 8px}
+.auth-error{min-height:18px;color:var(--bad);font-size:12.5px;text-align:center;margin-top:8px}
 .q{display:flex;align-items:center;gap:12px;padding:12px 2px 0}
 .q .th{width:40px;height:40px;border-radius:10px}.q .th svg{width:19px;height:19px}
 .pbar{height:3px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:6px}
@@ -85,6 +87,10 @@ body.dragging #send{outline:2px dashed var(--acc);outline-offset:-2px}
 <div><h1>PocketDrop</h1><div class="sub" id="from">Connecting…</div></div></header>
 <section class="card" id="send">
 <div class="send-top"><b>Send to <span id="pc">your computer</span></b><span class="sub">Photos, videos, files or text</span></div>
+<div id="receive-auth" hidden><div class="sub">Enter the receive code shown in PocketDrop before sending anything to this computer.</div>
+<input class="code" id="authcode" type="text" inputmode="text" autocapitalize="characters" autocomplete="off" maxlength="9" placeholder="ABCD-EFGH" aria-label="Receive code">
+<button class="btn" id="authbtn" type="button">Unlock sending</button><div class="auth-error" id="autherr"></div></div>
+<div id="send-actions">
 <div class="two">
 <label class="btn"><svg><use href="#i-up"/></svg><span>Choose files</span><input type="file" id="pick" multiple aria-label="Choose files to send"></label>
 <button class="btn sec" id="notebtn" type="button"><svg><use href="#i-text"/></svg><span>Text</span></button>
@@ -92,6 +98,7 @@ body.dragging #send{outline:2px dashed var(--acc);outline-offset:-2px}
 <div id="note" hidden><textarea id="notetext" placeholder="Type or paste text to send"></textarea>
 <div class="two"><button class="btn sec" id="notecancel" type="button">Cancel</button><button class="btn" id="notesend" type="button">Send text</button></div></div>
 <div id="queue"></div>
+</div>
 </section>
 <div id="app"></div>
 <p class="hint" id="hint"></p>
@@ -120,7 +127,7 @@ async function poll(){
     if(r.status===404)return gone();
     const m=await r.json();
     $("#off").hidden=true;
-    if(!data||m.rev!==data.rev||m.ready!==data.ready){data=m;render()}
+    if(!data||m.rev!==data.rev||m.ready!==data.ready||m.receiveAuth!==data.receiveAuth||m.receiveOk!==data.receiveOk){data=m;render()}
     else{data=m;progress()}
   }catch(e){$("#off").hidden=false}
   if(!document.hidden)timer=setTimeout(poll,data&&data.ready?2500:700);
@@ -143,6 +150,7 @@ function render(){
   const m=data,app=$("#app");
   $("#from").textContent="Connected to "+m.pc;
   $("#pc").textContent=m.pc;
+  updateSendAuth();
   const nf=m.files.length;
   document.title=nf?`PocketDrop · ${plural(nf,"file")}`:"PocketDrop";
   let h=`<div class="sec-title">From ${esc(m.pc)}</div>`,th="";
@@ -250,6 +258,27 @@ function addFiles(list){
   pump();
 }
 
+function updateSendAuth(){
+  const locked=!!(data&&data.receiveAuth&&!data.receiveOk);
+  $("#receive-auth").hidden=!locked;
+  $("#send-actions").hidden=locked;
+  if(locked)setTimeout(()=>$("#authcode").focus(),0);
+}
+
+async function unlockSending(){
+  const input=$("#authcode"),error=$("#autherr"),button=$("#authbtn");
+  const code=input.value.toUpperCase().replace(/[^A-Z0-9]/g,"");
+  if(code.length!==8){error.textContent="Enter the full eight-character code.";return}
+  button.setAttribute("aria-disabled","true");error.textContent="";
+  try{
+    const r=await fetch("auth",{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:code});
+    if(r.status===204){data.receiveOk=true;input.value="";updateSendAuth();return}
+    error.textContent=r.status===429?"Too many attempts. Scan the PocketDrop QR code again.":"That code didn't match.";
+    input.select();
+  }catch(e){error.textContent="Couldn't reach the computer."}
+  finally{button.removeAttribute("aria-disabled")}
+}
+
 function draw(it){
   if(!it.el){
     it.el=document.createElement("div");
@@ -296,6 +325,8 @@ async function pump(){
 }
 
 function fail(status){
+  if(status===401){if(data){data.receiveOk=false;updateSendAuth()}return new Error("Enter the new receive code, then tap retry.")}
+  if(status===429)return new Error("Too many receive-code attempts. Scan the QR code again.");
   if(status===507)return new Error("Your computer is out of disk space");
   if(status===404)return new Error("This upload expired. Tap retry.");
   if(status===413)return new Error("Too large to send as text");
@@ -303,6 +334,7 @@ function fail(status){
 }
 
 async function upload(it){
+  if(data&&data.receiveAuth&&!data.receiveOk)throw fail(401);
   if(!it.id){
     const r=await fetch(`up?name=${enc(it.name)}&size=${it.size}`,{method:"POST"});
     if(!r.ok)throw fail(r.status);
@@ -355,12 +387,15 @@ function put(it,blob){
 }
 
 async function sendText(it){
+  if(data&&data.receiveAuth&&!data.receiveOk)throw fail(401);
   const r=await fetch("text",{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:it.body});
   if(r.status!==204)throw fail(r.status);
   it.state="done";
 }
 
 $("#pick").addEventListener("change",e=>{addFiles(e.target.files);e.target.value=""});
+$("#authbtn").addEventListener("click",unlockSending);
+$("#authcode").addEventListener("keydown",e=>{if(e.key==="Enter")unlockSending()});
 $("#notebtn").addEventListener("click",()=>{$("#note").hidden=false;$("#notetext").focus()});
 $("#notecancel").addEventListener("click",()=>{$("#note").hidden=true});
 $("#notesend").addEventListener("click",()=>{

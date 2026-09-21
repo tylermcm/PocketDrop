@@ -12,9 +12,10 @@ Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or ac
   - Several files or any folder also get a **Download all** zip that keeps the folder structure.
   - Each file is compressed only if that pays off: already-compressed formats (JPEG, MP4, ZIP, DOCX, ...) are stored as-is, text-like formats are deflated, and unknown types are sample-tested first.
   - CRCs and compression are computed in parallel in the background, so the zip streams immediately with an exact size, resumable range requests, and zip64 for very large bundles.
-- **Two ways to connect**:
+- **Three ways to connect**:
   - **Same Wi-Fi**: direct LAN transfer, fastest.
-  - **Anywhere**: a Cloudflare quick tunnel (`https://*.trycloudflare.com`), so a phone on mobile data can reach the computer. It needs no port forwarding, no account, and no VPN app on the phone. `cloudflared` is fetched once on request and validated before installation.
+  - **Anywhere**: a Cloudflare quick tunnel (`https://*.trycloudflare.com`), so a phone on mobile data can reach the computer. It needs no port forwarding, no account, and no VPN app on the phone. PocketDrop warns before enabling it, can copy the QR image or open the system Share sheet, and shows a separate eight-character receive code that a phone must enter before it can upload files or text. `cloudflared` is fetched once on request and validated before installation.
+  - **Offline (Windows)**: PocketDrop creates a temporary Wi-Fi network with its own name and password. Scan once to join it, then scan the new QR code to transfer directly with no router or internet connection. On a PC with no Wi-Fi adapter, the same Offline mode automatically falls back to Bluetooth PAN: pair the phone, enable Android Bluetooth tethering or iPhone Personal Hotspot, and connect it as an access point in Windows. Bluetooth has no PocketDrop file-size cap, but large transfers are much slower. The offline connection stops when you leave Offline mode or close PocketDrop.
 - **Send from your phone**:
   - The phone page has **Send to <computer>**: pick photos, videos or any files, or send a note.
   - Uploads go in resumable 8 MB chunks with progress, speed, cancel and retry, and keep the screen awake while sending. There's no size limit.
@@ -41,7 +42,7 @@ build.bat
 
 Output: `build\PocketDrop.exe`. You can also pass paths on the command line: `PocketDrop.exe file1 folder2`.
 
-On first launch Windows asks whether to allow network access. Choose **Allow** for private networks, or phones on your Wi-Fi can't connect.
+On first launch Windows asks whether to allow network access. Choose **Allow** for private networks, or phones on your Wi-Fi or PocketDrop hotspot can't connect.
 
 ### macOS
 
@@ -75,6 +76,8 @@ Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x
 - Links also end when PocketDrop closes, when you choose **New link**, or after a download if that option is on.
 - Responses carry `Referrer-Policy: no-referrer` and a strict CSP. HTML and SVG previews are sandboxed.
 - Same Wi-Fi mode is plain HTTP on your LAN. Anywhere mode is HTTPS from the phone to Cloudflare, and then goes through the tunnel.
+- Anyone who has an active Anywhere link can view and download its shared files until the link expires or is revoked. Phone-to-computer uploads through Anywhere require the separate receive code shown only in the desktop app; authorization is scoped to that phone session and is reset with a new link.
+- Offline mode uses a temporary WPA2-protected Wi-Fi Direct network when Wi-Fi hardware is available. Its random credentials live only for that hotspot session. The Bluetooth fallback uses the phone's PAN tethering connection. In both cases, PocketDrop serves the transfer directly from the computer.
 - Windows verifies the downloaded cloudflared executable's publisher signature. macOS validates its code-signing state. Linux checks that the official HTTPS download is a valid ELF executable before installing it in the user's application-data directory.
 
 ## Troubleshooting Anywhere mode
@@ -100,6 +103,7 @@ All paths are relative to the phone session URL `/s/<session>/`:
 
 | Request | Purpose |
 |---|---|
+| `POST auth` | Authorize phone-to-computer sending for this session using the Anywhere receive code. Required only in Anywhere mode; eight failed attempts lock the session. |
 | `POST up?name=<name>&size=<bytes>` | Start an upload. Returns `{"id","received":0,"chunk"}`, or `507 {"error":"disk"}` when there isn't room. |
 | `PUT up/<id>?offset=<n>` | Write one chunk (≤ 32 MB; the page uses 8 MB to stay under Cloudflare's 100 MB request limit). Re-sending a chunk is safe; an offset past what was received returns `409 {"received"}`. The final chunk returns `{"done":true,"name"}` with the saved name. |
 | `GET up/<id>` | Bytes received so far, for resuming after a dropped connection. |

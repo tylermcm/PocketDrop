@@ -13,9 +13,9 @@ if not exist build\obj mkdir build\obj
 if not exist src\win\app.ico python tools\make_icon.py || exit /b 1
 
 set SRC=src\core\qr.cpp src\core\deflate.cpp src\core\bundle.cpp src\core\http.cpp src\core\tunnel.cpp ^
- src\ui\ui.cpp src\ui\icons.cpp src\win\platform_win.cpp src\win\gfx_d2d.cpp src\win\main_win.cpp
-set LIBS=user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib d2d1.lib dwrite.lib ^
- windowscodecs.lib ws2_32.lib iphlpapi.lib winhttp.lib wintrust.lib crypt32.lib bcrypt.lib uxtheme.lib advapi32.lib
+ src\ui\ui.cpp src\ui\icons.cpp src\win\platform_win.cpp src\win\hotspot_win.cpp src\win\gfx_d2d.cpp src\win\main_win.cpp
+set LIBS=user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib d2d1.lib dwrite.lib ^
+ windowscodecs.lib ws2_32.lib iphlpapi.lib winhttp.lib wintrust.lib crypt32.lib bcrypt.lib uxtheme.lib advapi32.lib runtimeobject.lib
 
 rc /nologo /fo build\app.res src\win\app.rc || exit /b 1
 cl /nologo /std:c++20 /O2 /GL /Gy /EHsc /W4 /utf-8 /MT /DUNICODE /D_UNICODE /DNDEBUG ^

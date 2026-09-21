@@ -12,7 +12,7 @@ rm -rf "$OBJ" "$APP" build/PocketDrop-mac.zip
 mkdir -p "$OBJ" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 CXXFLAGS="-std=c++20 -O2 -Wall -Wno-unused-parameter $ARCHS -mmacosx-version-min=$MIN"
-SOURCES="src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp
+SOURCES="src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp src/core/hotspot_stub.cpp
          src/ui/ui.cpp src/ui/icons.cpp src/mac/platform_mac.mm src/mac/gfx_cg.mm src/mac/main_mac.mm"
 
 pids=()

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,6 +69,33 @@ struct LanAddr {
     bool wifi = false;
 };
 std::vector<LanAddr> lan_addresses(); // best candidate first
+
+// ---- Offline hotspot
+enum class HotspotState { Unavailable, Off, Starting, Waiting, On, Failed };
+
+class Hotspot {
+public:
+    explicit Hotspot(std::function<void()> changed);
+    ~Hotspot();
+    Hotspot(const Hotspot&) = delete;
+    Hotspot& operator=(const Hotspot&) = delete;
+
+    bool supported() const;
+    void start();
+    void stop();
+    void poll();
+    HotspotState state() const;
+    bool connected() const;
+    bool uses_bluetooth() const;
+    std::string ssid() const;
+    std::string passphrase() const;
+    std::string local_ip() const;
+    std::string message() const;
+
+private:
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
+};
 
 // ---- Thumbnails: JPEG bytes, empty when the OS can't render one
 std::vector<uint8_t> thumbnail_jpeg(const std::string& path, int maxSide);

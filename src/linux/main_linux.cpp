@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <memory>
 
@@ -152,6 +153,18 @@ public:
         if (error) g_error_free(error);
     }
 
+    bool copyImage(const std::vector<uint8_t>& rgba, int width, int height) override {
+        if (width <= 0 || height <= 0 || rgba.size() != (size_t)width * height * 4) return false;
+        GdkPixbuf* image = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, width, height);
+        if (!image) return false;
+        int stride = gdk_pixbuf_get_rowstride(image);
+        guchar* pixels = gdk_pixbuf_get_pixels(image);
+        for (int y = 0; y < height; y++) memcpy(pixels + y * stride, rgba.data() + (size_t)y * width * 4, width * 4);
+        gtk_clipboard_set_image(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), image);
+        g_object_unref(image);
+        return true;
+    }
+
     void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) override {
         GtkWidget* dialog = gtk_file_chooser_dialog_new(title.c_str(), GTK_WINDOW(window),
                                                         GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, "Cancel",
@@ -221,6 +234,24 @@ public:
         gtk_window_set_title(GTK_WINDOW(dialog), title.c_str());
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
+    }
+
+    bool confirmAnywhereRisk(bool& dontShowAgain) override {
+        GtkWidget* dialog = gtk_message_dialog_new(
+            GTK_WINDOW(window), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s",
+            "Anyone with this link can download the shared files");
+        gtk_message_dialog_format_secondary_text(
+            GTK_MESSAGE_DIALOG(dialog), "%s",
+            "The link remains active until it expires, you create a new link, leave Anywhere mode, or close "
+            "PocketDrop. Sending files back to this computer requires the separate receive code shown in PocketDrop.");
+        gtk_dialog_add_buttons(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL, "Continue", GTK_RESPONSE_OK, nullptr);
+        GtkWidget* check = gtk_check_button_new_with_label("Don't show this warning again");
+        gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))), check, FALSE, FALSE, 6);
+        gtk_widget_show(check);
+        int response = gtk_dialog_run(GTK_DIALOG(dialog));
+        dontShowAgain = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(check));
+        gtk_widget_destroy(dialog);
+        return response == GTK_RESPONSE_OK;
     }
 
     int loadSetting(const char* key, int def) override {

@@ -190,6 +190,21 @@ def check_uploads(c, S):
     return c
 
 
+def check_receive_auth(c, S):
+    r, body = req(c, f"{S}api/manifest")
+    m = js(body)
+    expect("receive auth advertised", r.status == 200 and m.get("receiveAuth") is True and m.get("receiveOk") is False)
+    r, _ = req(c, f"{S}up?name=blocked.bin&size=1", "POST")
+    expect("unauthorized upload blocked", r.status == 401)
+    r, _ = req(c, f"{S}auth", "POST", {"Content-Type": "text/plain"}, b"WRONG123")
+    expect("wrong receive code rejected", r.status == 401)
+    r, _ = req(c, f"{S}auth", "POST", {"Content-Type": "text/plain"}, b"abcd-efgh")
+    expect("receive code accepted", r.status == 204)
+    r, body = req(c, f"{S}api/manifest")
+    expect("authorized session remembered", r.status == 200 and js(body).get("receiveOk") is True)
+    return c
+
+
 def check_expiry(c, S):
     t0 = token()
     flag("unshare", True)
@@ -237,6 +252,7 @@ def check(src):
         r, _ = req(c, "/s/notasession/api/manifest")
         expect("unknown session 404", r.status == 404)
 
+        c = check_receive_auth(c, S)
         check_downloads(c, S, src)
         c = check_uploads(c, S)
         check_expiry(c, S)

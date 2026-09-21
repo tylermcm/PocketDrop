@@ -12,7 +12,7 @@ mkdir -p "$OBJ" "$OUT"
 CXX=${CXX:-g++}
 CXXFLAGS="-std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -pthread $(pkg-config --cflags gtk+-3.0 libcurl)"
 LIBS="$(pkg-config --libs gtk+-3.0 libcurl) -pthread"
-SOURCES="src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp
+SOURCES="src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp src/core/hotspot_stub.cpp
          src/ui/ui.cpp src/ui/icons.cpp src/linux/platform_linux.cpp src/linux/gfx_cairo.cpp src/linux/main_linux.cpp"
 
 objs=()

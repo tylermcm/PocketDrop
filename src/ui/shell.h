@@ -22,11 +22,22 @@ public:
     virtual void clientSize(float& w, float& h) = 0; // DIPs
 
     virtual void copyText(const std::string& text) = 0;
+    // Copies tightly packed RGBA pixels to the system clipboard.
+    virtual bool copyImage(const std::vector<uint8_t>&, int, int) { return false; }
     // Clipboard contents: file paths, else an image saved as a PNG file path, else text.
     virtual void readClipboard(std::vector<std::string>& paths, std::string& text) = 0;
     virtual void browse(bool folders, std::function<void(const std::vector<std::string>&)> done) = 0;
     virtual void chooseFolder(const std::string& title, std::function<void(const std::string&)> done) = 0;
     virtual void openUrl(const std::string& url) = 0;
+    virtual void openBluetoothSetup() {}
+    virtual void shareText(const std::string&, const std::string& text) { copyText(text); }
+    virtual bool confirmAnywhereRisk(bool& dontShowAgain) {
+        dontShowAgain = false;
+        alert("Anywhere link security",
+              "Anyone with the active link can view and download the files you share until the link expires or is revoked.\n\n"
+              "Sending files back to this computer requires the receive code shown in PocketDrop.");
+        return true;
+    }
     virtual void revealPath(const std::string& path) = 0; // show a file selected in the file manager
     virtual void attention() {}                           // taskbar flash / Dock bounce when not focused
     // Shows a menu with its top-right corner at (x, y) in DIPs. Returns the chosen id or 0.
