@@ -1,5 +1,8 @@
 // Windows host: window, message loop, drag & drop, and the Shell services the shared UI uses.
 #include "gfx_d2d.h"
+#include "window_fit.h"
+#include "update_win.h"
+#include "../core/version.h"
 #include "../ui/ui.h"
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -11,11 +14,13 @@
 namespace {
 
 const wchar_t* CLASS_NAME = L"PocketDropWindow";
+constexpr DWORD WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
 const wchar_t* REG_KEY = L"Software\\PocketDrop";
 const ULONG_PTR COPYDATA_PATHS = 0x5044; // 'PD'
 const UINT WM_APP_CALL = WM_APP + 1;
 const UINT_PTR TIMER_FAST = 1, TIMER_SLOW = 2;
 const int ID_SENDTO = 1000;
+const int ID_UPDATE = 1001, ID_RELEASES = 1002;
 
 std::wstring wide(const std::string& s) {
     if (s.empty()) return {};
@@ -120,8 +125,53 @@ HMENU buildMenu(const std::vector<MenuItem>& items) {
 
 class WinShell : public Shell {
 public:
+    ~WinShell() override { stopUpdates(); }
     HWND hwnd = nullptr;
     float dpi = 96.0f;
+    std::thread updateWorker;
+    std::atomic<bool> updateCancel{false};
+    bool updateBusy = false;
+
+    void stopUpdates() {
+        updateCancel = true;
+        if (updateWorker.joinable()) updateWorker.join();
+    }
+
+    void checkUpdates() {
+        if (updateBusy) return;
+        if (updateWorker.joinable()) updateWorker.join();
+        updateBusy = true; updateCancel = false;
+        updateWorker = std::thread([this] {
+            auto release = findUpdate();
+            if (updateCancel) return;
+            post([this, release] {
+                updateBusy = false;
+                if (!release.error.empty()) { alert("PocketDrop updates", release.error); return; }
+                if (!release.newer) { alert("PocketDrop updates", "PocketDrop " PD_VERSION " is up to date."); return; }
+                if (release.url.empty() || release.digest.empty()) {
+                    alert("PocketDrop update available", release.tag + " is available. Its release page will open for download.");
+                    openUrl("https://github.com/tylermcm/PocketDrop/releases/latest"); return;
+                }
+                auto message = wide("PocketDrop " + release.tag + " is available (installed: " PD_VERSION ").\n\n"
+                    "Download and install it? PocketDrop will close, ending any active transfers. Your settings and received files will be kept.");
+                if (MessageBoxW(hwnd, message.c_str(), L"PocketDrop update", MB_YESNO | MB_ICONINFORMATION) != IDYES) return;
+                if (updateWorker.joinable()) updateWorker.join();
+                updateBusy = true;
+                updateWorker = std::thread([this, release] {
+                    std::string error;
+                    auto path = downloadUpdate(release, updateCancel, error);
+                    if (updateCancel) return;
+                    post([this, path, error] {
+                        updateBusy = false;
+                        if (path.empty()) { alert("PocketDrop updates", error); return; }
+                        auto result = ShellExecuteW(hwnd, L"open", wide(path).c_str(), L"/SP-", nullptr, SW_SHOWNORMAL);
+                        if ((INT_PTR)result <= 32) { alert("PocketDrop updates", "Couldn't launch the installer. Try again from the release page."); return; }
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    });
+                });
+            });
+        });
+    }
 
     void invalidate() override { InvalidateRect(hwnd, nullptr, FALSE); }
     void setAnimating(bool on) override {
@@ -150,6 +200,48 @@ public:
             if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
         }
         CloseClipboard();
+    }
+
+    bool copyImage(const std::vector<uint8_t>& rgba, int width, int height) override {
+        if (width <= 0 || height <= 0 || rgba.size() != (size_t)width * height * 4) return false;
+        size_t pixels = rgba.size();
+        HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPV5HEADER) + pixels);
+        if (!dib) return false;
+        auto* header = (BITMAPV5HEADER*)GlobalLock(dib);
+        if (!header) { GlobalFree(dib); return false; }
+        *header = {};
+        header->bV5Size = sizeof *header;
+        header->bV5Width = width; header->bV5Height = -height;
+        header->bV5Planes = 1; header->bV5BitCount = 32;
+        header->bV5Compression = BI_BITFIELDS;
+        header->bV5RedMask = 0x00ff0000; header->bV5GreenMask = 0x0000ff00;
+        header->bV5BlueMask = 0x000000ff; header->bV5AlphaMask = 0xff000000;
+        header->bV5CSType = LCS_sRGB;
+        auto* dst = (uint8_t*)(header + 1);
+        for (size_t i = 0; i < pixels; i += 4) {
+            dst[i] = rgba[i+2]; dst[i+1] = rgba[i+1]; dst[i+2] = rgba[i]; dst[i+3] = rgba[i+3];
+        }
+        GlobalUnlock(dib);
+        if (!OpenClipboard(hwnd)) { GlobalFree(dib); return false; }
+        EmptyClipboard();
+        bool ok = SetClipboardData(CF_DIBV5, dib) != nullptr;
+        CloseClipboard();
+        if (!ok) GlobalFree(dib);
+        return ok;
+    }
+
+    void openBluetoothSetup() override { openUrl("ms-settings:bluetooth"); }
+
+    void shareText(const std::string&, const std::string& text) override {
+        copyText(text);
+        alert("Share PocketDrop link", "The link is copied. Paste it into a message on your preferred app.");
+    }
+
+    bool confirmAnywhereRisk(bool& dontShowAgain) override {
+        dontShowAgain = false;
+        return MessageBoxW(hwnd, L"Anyone with your active Anywhere link can download the files you share.\n\n"
+            L"Sending files back requires the receive code shown here.\n\nEnable Anywhere?",
+            L"Anywhere sharing", MB_OKCANCEL | MB_ICONINFORMATION) == IDOK;
     }
 
     void readClipboard(std::vector<std::string>& paths, std::string& text) override {
@@ -286,10 +378,18 @@ public:
         m.label = "Show in \xE2\x80\x9CSend to\xE2\x80\x9D menu";
         m.checked = !lnk.empty() && exists(lnk);
         m.enabled = !lnk.empty();
-        return {m};
+        MenuItem updates;
+        updates.id = ID_UPDATE;
+        updates.label = updateBusy ? "Checking / downloading update..." : "Check for updates...";
+        updates.enabled = !updateBusy;
+        MenuItem releases;
+        releases.id = ID_RELEASES; releases.label = "Downloads and release notes";
+        return {m, updates, releases};
     }
 
     void handleExtraMenu(int id) override {
+        if (id == ID_UPDATE) { checkUpdates(); return; }
+        if (id == ID_RELEASES) { openUrl("https://github.com/tylermcm/PocketDrop/releases/latest"); return; }
         if (id != ID_SENDTO) return;
         std::wstring lnk = sendToLink();
         if (lnk.empty()) return;
@@ -315,6 +415,14 @@ struct Window {
     Ui ui{shell};
     bool tracking = false;
 };
+
+void fitToMonitor(HWND hwnd, const RECT& desired) {
+    MONITORINFO mi{sizeof mi};
+    GetMonitorInfoW(MonitorFromRect(&desired, MONITOR_DEFAULTTONEAREST), &mi);
+    auto b = fitWindow(desired.left, desired.top, desired.right - desired.left, desired.bottom - desired.top,
+                       mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
+    SetWindowPos(hwnd, nullptr, b.x, b.y, b.width, b.height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
 
 class DropTarget : public IDropTarget {
 public:
@@ -438,12 +546,46 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         w->gfx.resize(LOWORD(lp), HIWORD(lp));
         w->shell.invalidate();
         return 0;
+    case WM_NCHITTEST: {
+        LRESULT hit = DefWindowProcW(h, msg, wp, lp);
+        if (hit != HTCLIENT || IsZoomed(h)) return hit;
+        // Extend the native resize border a few DIPs into the empty client
+        // margins so laptop touchpads can grab it easily. Caption buttons and
+        // Windows' own non-client edges keep their normal behavior.
+        POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(h, &p);
+        RECT client; GetClientRect(h, &client);
+        UINT dpi = GetDpiForWindow(h);
+        int grip = MulDiv(6, dpi ? dpi : 96, 96);
+        bool left = p.x < grip, right = p.x >= client.right - grip;
+        bool bottom = p.y >= client.bottom - grip;
+        if (bottom) return left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+        return hit;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* limits = (MINMAXINFO*)lp;
+        UINT dpi = GetDpiForWindow(h);
+        MONITORINFO mi{sizeof mi};
+        GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+        limits->ptMinTrackSize.x = std::min(MulDiv(WINDOW_MIN_WIDTH, dpi ? dpi : 96, 96), (int)(mi.rcWork.right - mi.rcWork.left));
+        limits->ptMinTrackSize.y = std::min(MulDiv(WINDOW_MIN_HEIGHT, dpi ? dpi : 96, 96), (int)(mi.rcWork.bottom - mi.rcWork.top));
+        return 0;
+    }
     case WM_DPICHANGED: {
         w->shell.dpi = (float)HIWORD(wp);
         w->gfx.setDpi(w->shell.dpi);
         const RECT* r = (const RECT*)lp;
-        SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        fitToMonitor(h, *r);
         return 0;
+    }
+    case WM_DISPLAYCHANGE:
+    case WM_SETTINGCHANGE: {
+        if (w && !IsIconic(h) && !IsZoomed(h)) {
+            RECT r; GetWindowRect(h, &r); fitToMonitor(h, r);
+        }
+        break;
     }
     case WM_MOUSEMOVE: {
         float x, y;
@@ -520,6 +662,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY: {
+        w->shell.stopUpdates();
+        if (!IsIconic(h) && !IsZoomed(h)) {
+            RECT r; GetWindowRect(h, &r);
+            int dpi = (int)GetDpiForWindow(h);
+            w->shell.saveSetting("WindowWidth", MulDiv(r.right - r.left, 96, dpi));
+            w->shell.saveSetting("WindowHeight", MulDiv(r.bottom - r.top, 96, dpi));
+        }
         RevokeDragDrop(h);
         KillTimer(h, TIMER_FAST);
         KillTimer(h, TIMER_SLOW);
@@ -571,19 +720,20 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&wc);
 
     auto win = std::make_unique<Window>();
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    HWND hwnd = CreateWindowExW(0, CLASS_NAME, L"PocketDrop", style, CW_USEDEFAULT, CW_USEDEFAULT, 385, 750, nullptr,
+    HWND hwnd = CreateWindowExW(0, CLASS_NAME, L"PocketDrop", WINDOW_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, 385, 750, nullptr,
                                 nullptr, hi, win.get());
     if (!hwnd) return 1;
 
-    // 385x750 at the window's actual DPI, centred on its monitor's work area.
+    // Restore the preferred size in DIPs, bounded by this monitor's work area.
     UINT dpi = GetDpiForWindow(hwnd);
-    int w = MulDiv(385, (int)dpi, 96), hgt = MulDiv(750, (int)dpi, 96);
+    int w = MulDiv(std::clamp(win->shell.loadSetting("WindowWidth", WINDOW_DEFAULT_WIDTH), WINDOW_MIN_WIDTH, 1600), (int)dpi, 96);
+    int hgt = MulDiv(std::clamp(win->shell.loadSetting("WindowHeight", WINDOW_DEFAULT_HEIGHT), WINDOW_MIN_HEIGHT, 1600), (int)dpi, 96);
     MONITORINFO mi{sizeof mi};
     GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
     int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2;
     int y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - hgt) / 2;
-    SetWindowPos(hwnd, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT desired{x, y, x + w, y + hgt};
+    fitToMonitor(hwnd, desired);
 
     auto* drop = new DropTarget(win.get());
     RegisterDragDrop(hwnd, drop);

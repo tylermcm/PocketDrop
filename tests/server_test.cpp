@@ -24,9 +24,10 @@ int main(int argc, char** argv) {
     fast.activeWindowMs = 1500;
     srv.setPolicy(fast);
     srv.setInbox(inbox);
+    if (const char* code = getenv("PD_TEST_RECEIVE_CODE")) srv.setReceiveCode(code);
     const char* portEnv = getenv("PD_TEST_PORT");
     int port = portEnv && *portEnv ? atoi(portEnv) : 47291;
-    if (!srv.start(port, true) || srv.port() != port) {
+    if (!srv.start(port, getenv("PD_TEST_LAN") == nullptr) || srv.port() != port) {
         // The checkers talk to this exact port; a fallback port would silently test some other server.
         std::cerr << "server_test: port " << port << " is unavailable (is PocketDrop running? set PD_TEST_PORT)\n";
         return 1;
@@ -49,6 +50,17 @@ int main(int argc, char** argv) {
 
     uint64_t deadline = plat::tick_ms() + (uint64_t)atoi(argv[1]) * 1000;
     while (plat::tick_ms() < deadline && !exists("done")) {
+        if (exists("rotate")) {
+            plat::file_remove(dir + "/rotate");
+            srv.newLink();
+            writeToken();
+        }
+        if (exists("nearbyoff")) {
+            plat::file_remove(dir + "/nearbyoff");
+            srv.stopPcShare();
+            srv.newLink();
+            writeToken();
+        }
         srv.debugDiskFull(exists("diskfull"));
         if (srv.maintain(!exists("unshare"))) {
             writeToken();

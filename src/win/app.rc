@@ -1,11 +1,12 @@
 #include <windows.h>
+#include "../core/version.h"
 
 1 ICON "app.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION PD_VERSION_NUM
+PRODUCTVERSION PD_VERSION_NUM
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,8 +16,8 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "PocketDrop"
             VALUE "ProductName", "PocketDrop"
-            VALUE "FileVersion", "1.0.0"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "FileVersion", PD_VERSION
+            VALUE "ProductVersion", PD_VERSION
             VALUE "OriginalFilename", "PocketDrop.exe"
         END
     END

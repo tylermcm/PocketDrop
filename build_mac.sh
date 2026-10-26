@@ -13,7 +13,7 @@ mkdir -p "$OBJ" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 CXXFLAGS="-std=c++20 -O2 -Wall -Wno-unused-parameter $ARCHS -mmacosx-version-min=$MIN"
 SOURCES="src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp
-         src/ui/ui.cpp src/ui/icons.cpp src/mac/platform_mac.mm src/mac/gfx_cg.mm src/mac/main_mac.mm"
+         src/core/nearby.cpp src/core/pc_transfer.cpp src/core/hotspot_stub.cpp src/ui/ui.cpp src/ui/icons.cpp src/mac/platform_mac.mm src/mac/gfx_cg.mm src/mac/main_mac.mm"
 
 pids=()
 objs=()
@@ -34,6 +34,10 @@ clang++ $ARCHS -mmacosx-version-min=$MIN -o "$APP/Contents/MacOS/PocketDrop" "${
 strip -x "$APP/Contents/MacOS/PocketDrop"
 
 cp src/mac/Info.plist "$APP/Contents/Info.plist"
+VERSION=$(sed -n 's/^#define PD_VERSION "\(.*\)"/\1/p' src/core/version.h)
+test -n "$VERSION"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 cp src/mac/app.icns "$APP/Contents/Resources/app.icns"
 codesign --force --sign - --timestamp=none "$APP"
 ditto -c -k --keepParent "$APP" build/PocketDrop-mac.zip

@@ -1,9 +1,7 @@
 @echo off
 rem Builds core_test, server_test and tunnel_test into the given directory.
 setlocal
-set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-for /f "usebackq delims=" %%i in (`call "%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
-call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul || exit /b 1
+call "%~dp0..\tools\msvc_env.bat" || exit /b 1
 cd /d "%~dp0.."
 set "OUT=%~1"
 if "%OUT%"=="" set "OUT=build\tests"
@@ -15,4 +13,7 @@ cl %FLAGS% /c %CORE% || exit /b 1
 for %%t in (core_test server_test tunnel_test) do (
     cl %FLAGS% /Fe:"%OUT%\%%t.exe" tests\%%t.cpp "%OUT%\obj\qr.obj" "%OUT%\obj\deflate.obj" "%OUT%\obj\bundle.obj" "%OUT%\obj\http.obj" "%OUT%\obj\tunnel.obj" "%OUT%\obj\platform_win.obj" %LIBS% || exit /b 1
 )
+cl %FLAGS% /Fe:"%OUT%\update_test.exe" tests\update_test.cpp src\win\update_win.cpp "%OUT%\obj\platform_win.obj" %LIBS% runtimeobject.lib || exit /b 1
+cl %FLAGS% /Fe:"%OUT%\discovery_test.exe" tests\discovery_test.cpp src\core\nearby.cpp "%OUT%\obj\platform_win.obj" %LIBS% || exit /b 1
+cl %FLAGS% /Fe:"%OUT%\pc_transfer_test.exe" tests\pc_transfer_test.cpp src\core\pc_transfer.cpp "%OUT%\obj\qr.obj" "%OUT%\obj\deflate.obj" "%OUT%\obj\bundle.obj" "%OUT%\obj\http.obj" "%OUT%\obj\platform_win.obj" %LIBS% || exit /b 1
 echo Tests built in %OUT%

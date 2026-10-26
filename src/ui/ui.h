@@ -4,6 +4,8 @@
 #include "../core/http.h"
 #include "../core/qr.h"
 #include "../core/tunnel.h"
+#include "../core/nearby.h"
+#include "../core/pc_transfer.h"
 #include "gfx.h"
 #include "shell.h"
 #include <map>
@@ -12,7 +14,23 @@
 
 inline constexpr int DEFAULT_PORT = 47291;
 
-enum class Hit { None, Menu, ModeLocal, ModeAnywhere, CardButton, Url, Copy, AddFiles, AddFolder, Third, Row, RowRemove };
+enum class Hit {
+    None,
+    Menu,
+    ModeLocal,
+    ModeOffline,
+    ModeAnywhere,
+    Nearby,
+    CardButton,
+    Url,
+    Copy,
+    Share,
+    AddFiles,
+    AddFolder,
+    Third,
+    Row,
+    RowRemove
+};
 
 struct HitTarget {
     Hit hit = Hit::None;
@@ -20,11 +38,25 @@ struct HitTarget {
     bool operator==(const HitTarget& o) const { return hit == o.hit && index == o.index; }
 };
 
-enum class CardState { DragOver, TunnelBusy, TunnelMissing, TunnelDownloading, TunnelFailed, NoNetwork, Qr };
+enum class CardState {
+    Pc,
+    DragOver,
+    TunnelBusy,
+    TunnelMissing,
+    TunnelDownloading,
+    TunnelFailed,
+    HotspotBusy,
+    BluetoothSetup,
+    HotspotFailed,
+    NoNetwork,
+    Qr
+};
 
 struct Layout {
     float w = 0, h = 0;
-    RectF logo, title, menu, seg, segLocal, segAny, card, cardButton, link, url, copy, info, list, add, folder, third;
+    RectF logo, title, menu, seg, segLocal, segOffline, segAny, nearby, card, cardButton, link, url, copy, share, info, list, add,
+        folder, third;
+    bool compactLink = false; // Copy/Share shown as icons, leaving the address room on a narrow window
 };
 
 class Ui {
@@ -53,9 +85,30 @@ public:
     void paste();
     void browse(bool folders);
     void copyLink();
+    void shareLink();
     void refreshNetwork();
 
+    // For hosts that draw their own interface (Image Triage's QML shell) and use Ui as the model:
+    // everything paint() shows, as JSON, and every click as a named command.
+    std::string stateJson();
+    void command(const std::string& name, const std::string& arg);
+    void removePaths(const std::vector<std::string>& list);
+
 private:
+#ifdef POCKETDROP_RENDER_TEST
+    friend struct UiRenderTest;
+#endif
+    void menuCommand(int cmd);
+    void showNearby();
+    void startPcSend();
+    void startPcReceive();
+    void stopPc();
+    void publishPc();
+    void pollPc();
+    void receiveFrom(const NearbyPeer& peer);
+    void pcAction();
+    void paintPc(Gfx& g, const Layout& L);
+    std::vector<NearbyPeer> pcSenders() const;
     struct Speed {
         uint64_t sent = 0, tick = 0;
         double bps = 0;
@@ -69,6 +122,7 @@ private:
     void clearAll();
     void setMode(int m);
     void newLink();
+    void rotateReceiveCode();
     std::string shareUrl() const;
     void refreshQr();
     void showMenu();
@@ -83,7 +137,7 @@ private:
     Layout layout() const;
     CardState cardState() const;
     HitTarget hitTest(float x, float y) const;
-    int rowCount() const { return (int)(received_.size() + paths_.size() + texts_.size()); }
+    int rowCount() const { return pcMode_ == PcMode::Receive ? (int)received_.size() : (int)(received_.size() + paths_.size() + texts_.size()); }
     float maxScroll() const;
 
     Shell& shell_;
@@ -98,11 +152,22 @@ private:
     std::string inbox_;
 
     HttpServer server_;
+    NearbyDiscovery nearby_;
+    enum class PcMode { Phone, Send, Receive };
+    PcMode pcMode_ = PcMode::Phone;
+    PcReceiver pcReceiver_;
+    PcDownload pcDownload_;
+    std::string pcOffer_;
+    bool pcSent_ = false, pcStarted_ = false, pcReceived_ = false;
+    uint64_t nextPcReceived_ = 1ull << 63;
+    Speed pcSpeed_;
     std::unique_ptr<Tunnel> tunnel_;
+    std::unique_ptr<plat::Hotspot> hotspot_;
     std::vector<plat::LanAddr> addrs_;
     int addrIndex_ = 0;
-    int mode_ = 0; // 0 = same Wi-Fi, 1 = anywhere
+    int mode_ = 0; // 0 = same Wi-Fi, 1 = anywhere, 2 = offline hotspot
     std::string qrText_;
+    std::string receiveCode_;
     qr::Code qr_;
 
     bool topmost_ = false, burnAfter_ = false, autoAnywhere_ = false;

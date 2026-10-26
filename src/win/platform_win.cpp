@@ -350,6 +350,9 @@ void file_close(File f) {
 bool file_rename(const std::string& from, const std::string& to) {
     return MoveFileExW(wide(from).c_str(), wide(to).c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
+bool file_rename_new(const std::string& from, const std::string& to) {
+    return MoveFileExW(wide(from).c_str(), wide(to).c_str(), 0) != 0;
+}
 
 void file_remove(const std::string& path) { DeleteFileW(wide(path).c_str()); }
 void make_dir(const std::string& path) { CreateDirectoryW(wide(path).c_str(), nullptr); }
@@ -489,13 +492,18 @@ HttpResult http_get(const std::string& url, const std::vector<std::string>& head
     std::wstring target = std::wstring(path, uc.dwUrlPathLength) + std::wstring(extra, uc.dwExtraInfoLength);
     std::wstring hdrs;
     for (const auto& h : headers) hdrs += wide(h) + L"\r\n";
-    HINTERNET s = WinHttpOpen(L"PocketDrop/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+    bool pcRequest = std::any_of(headers.begin(), headers.end(), [](const auto& h) { return h.rfind("X-PocketDrop-Receiver:", 0) == 0; });
+    HINTERNET s = WinHttpOpen(L"PocketDrop/1.0", pcRequest ? WINHTTP_ACCESS_TYPE_NO_PROXY : WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
     HINTERNET c = s ? WinHttpConnect(s, std::wstring(host, uc.dwHostNameLength).c_str(), uc.nPort, 0) : nullptr;
     HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", target.c_str(), nullptr, WINHTTP_NO_REFERER,
                                          WINHTTP_DEFAULT_ACCEPT_TYPES,
                                          uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
                     : nullptr;
     if (r) {
+        if (pcRequest) {
+            DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+            WinHttpSetOption(r, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy);
+        }
         WinHttpSetTimeouts(r, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
         if (WinHttpSendRequest(r, hdrs.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdrs.c_str(),
                                hdrs.empty() ? 0 : (DWORD)-1L, nullptr, 0, 0, 0) &&

@@ -98,6 +98,10 @@ void Gfx::icon(Icon i, const RectF& r, Color c, float stroke) {
             .to(9, 11).arc(11, 9, 2, true).close();
         p.move(5, 15).to(5, 6).arc(7, 4, 2, true).to(15, 4);
         break;
+    case Icon::Share:
+        p.move(12, 15).to(12, 3).move(7.5f, 7.5f).to(12, 3).to(16.5f, 7.5f);
+        p.move(5, 11).to(5, 19).arc(7, 21, 2, false).to(17, 21).arc(19, 19, 2, false).to(19, 11);
+        break;
     case Icon::Wifi:
         for (float rad : {4.0f, 8.0f, 12.0f}) {
             float dx = rad * 0.72f, dy = rad * 0.69f;

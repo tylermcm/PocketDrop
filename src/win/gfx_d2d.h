@@ -21,6 +21,10 @@ public:
     void end();
     void resize(UINT w, UINT h);
     void setDpi(float dpi);
+#ifdef POCKETDROP_RENDER_TEST
+    bool beginBitmap(UINT width, UINT height, float dpi = 96);
+    bool saveBitmap(const wchar_t* path);
+#endif
 
     void clear(Color c) override;
     void fillRect(const RectF& r, Color c) override;
@@ -48,7 +52,10 @@ private:
     ComPtr<ID2D1Factory> d2d_;
     ComPtr<IDWriteFactory> dw_;
     ComPtr<IWICImagingFactory> wic_;
-    ComPtr<ID2D1HwndRenderTarget> rt_;
+    ComPtr<ID2D1RenderTarget> rt_;
+#ifdef POCKETDROP_RENDER_TEST
+    ComPtr<IWICBitmap> bitmap_;
+#endif
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<ID2D1StrokeStyle> round_, dashed_;
     ComPtr<IDWriteTextFormat> formats_[(int)Font::Count];

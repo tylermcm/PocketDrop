@@ -339,8 +339,13 @@ void createWindow(App* app, const std::vector<std::string>& initial) {
 
     app->shell.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app->shell.window), "PocketDrop");
-    gtk_window_set_default_size(GTK_WINDOW(app->shell.window), 385, 750);
-    gtk_window_set_resizable(GTK_WINDOW(app->shell.window), FALSE);
+    GdkRectangle work{0, 0, 1920, 1080};
+    GdkDisplay* display = gdk_display_get_default();
+    GdkMonitor* monitor = gdk_display_get_primary_monitor(display);
+    if (!monitor && gdk_display_get_n_monitors(display)) monitor = gdk_display_get_monitor(display, 0);
+    if (monitor) gdk_monitor_get_workarea(monitor, &work);
+    gtk_window_set_default_size(GTK_WINDOW(app->shell.window), std::min(400, work.width), std::min(672, work.height - 40));
+    gtk_window_set_resizable(GTK_WINDOW(app->shell.window), TRUE);
     gtk_window_set_position(GTK_WINDOW(app->shell.window), GTK_WIN_POS_CENTER);
 
     std::string icon = util::path_join(plat::exe_dir(), "PocketDrop.png");
@@ -348,7 +353,7 @@ void createWindow(App* app, const std::vector<std::string>& initial) {
     gtk_window_set_icon_from_file(GTK_WINDOW(app->shell.window), icon.c_str(), nullptr);
 
     app->shell.view = gtk_drawing_area_new();
-    gtk_widget_set_size_request(app->shell.view, 385, 722);
+    gtk_widget_set_size_request(app->shell.view, std::min(320, work.width), std::min(460, work.height - 40));
     gtk_widget_set_can_focus(app->shell.view, TRUE);
     gtk_widget_add_events(app->shell.view, GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK | GDK_BUTTON_PRESS_MASK |
                                                  GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK |

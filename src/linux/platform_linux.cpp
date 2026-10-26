@@ -210,6 +210,11 @@ void file_close(File f) {
     if (f != BAD_FILE) close((int)f);
 }
 bool file_rename(const std::string& from, const std::string& to) { return rename(from.c_str(), to.c_str()) == 0; }
+bool file_rename_new(const std::string& from, const std::string& to) {
+    if (link(from.c_str(), to.c_str()) != 0) return false;
+    unlink(from.c_str());
+    return true;
+}
 void file_remove(const std::string& path) { unlink(path.c_str()); }
 void make_dir(const std::string& path) {
     std::error_code ec;
@@ -373,7 +378,9 @@ HttpResult http_get(const std::string& url, const std::vector<std::string>& head
     curl_slist* hl = nullptr;
     for (const auto& x : headers) hl = curl_slist_append(hl, x.c_str());
     curl_easy_setopt(h, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    bool pcRequest = std::any_of(headers.begin(), headers.end(), [](const auto& value) { return value.rfind("X-PocketDrop-Receiver:", 0) == 0; });
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, pcRequest ? 0L : 1L);
+    if (pcRequest) curl_easy_setopt(h, CURLOPT_NOPROXY, "*");
     curl_easy_setopt(h, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, "PocketDrop/1.0");
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");

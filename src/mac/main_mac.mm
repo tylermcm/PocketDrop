@@ -2,6 +2,7 @@
 #import <AppKit/AppKit.h>
 #include "../ui/ui.h"
 #include "gfx_cg.h"
+#include <algorithm>
 
 class MacShell;
 
@@ -327,10 +328,11 @@ public:
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)n {
-    NSRect content = NSMakeRect(0, 0, 385, 722); // ~385x750 with the title bar, matching Windows
+    NSRect work = NSScreen.mainScreen.visibleFrame;
+    NSRect content = NSMakeRect(0, 0, std::min(400.0, work.size.width), std::min(672.0, work.size.height - 28));
     _window = [[NSWindow alloc] initWithContentRect:content
                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                                    NSWindowStyleMaskMiniaturizable
+                                                    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
     _window.title = @"PocketDrop";
@@ -338,6 +340,7 @@ public:
     _window.titlebarAppearsTransparent = YES;
     _window.backgroundColor = [NSColor colorWithSRGBRed:0x0F / 255.0 green:0x0F / 255.0 blue:0x13 / 255.0 alpha:1];
     _window.releasedWhenClosed = NO;
+    _window.contentMinSize = NSMakeSize(std::min(320.0, work.size.width), std::min(460.0, work.size.height - 28));
 
     PDView* view = [[PDView alloc] initWithFrame:content];
     [view registerForDraggedTypes:@[ NSPasteboardTypeFileURL, NSPasteboardTypeString ]];

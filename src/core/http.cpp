@@ -1,6 +1,8 @@
 #include "http.h"
 #include "webpage.h"
+#include "deflate.h"
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -12,7 +14,7 @@ struct HttpServer::Transfer {
     uint64_t total = 0;
     std::atomic<uint64_t> sent{0};
     std::atomic<bool> done{false};
-    bool ok = false, viaTunnel = false, incoming = false;
+    bool ok = false, viaTunnel = false, incoming = false, pc = false;
     uint64_t start = 0, end = 0;
 };
 
@@ -20,6 +22,8 @@ struct HttpServer::Session {
     std::string id, device;
     uint64_t lastSeen = 0; // guarded by the server mutex
     int inflight = 0;      // requests in progress
+    bool receiveAuthorized = false;
+    int authFailures = 0;
 };
 
 struct HttpServer::Upload {
@@ -31,6 +35,16 @@ struct HttpServer::Upload {
     std::shared_ptr<Transfer> transfer;
     std::mutex io; // one writer at a time
     bool closed = false;
+};
+
+struct HttpServer::PcOffer {
+    std::string token, receiver;
+    std::shared_ptr<Bundle> bundle;
+    std::atomic<bool> active{true};
+    bool streamed = false, complete = false;
+    uint32_t crc = 0;
+    uint64_t claimAt = 0;
+    plat::Sock socket = plat::BAD_SOCK; // guarded by mu_
 };
 
 struct Req {
@@ -160,13 +174,17 @@ const char* reason(int code) {
     case 206: return "Partial Content";
     case 301: return "Moved Permanently";
     case 302: return "Found";
+    case 303: return "See Other";
     case 400: return "Bad Request";
+    case 401: return "Unauthorized";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 409: return "Conflict";
     case 411: return "Length Required";
     case 413: return "Payload Too Large";
     case 416: return "Range Not Satisfiable";
+    case 422: return "Unprocessable Content";
+    case 429: return "Too Many Requests";
     case 503: return "Service Unavailable";
     case 507: return "Insufficient Storage";
     default: return "Error";
@@ -366,9 +384,11 @@ bool tokenMatch(const std::string& a, const char* b, size_t blen) {
     return diff == 0;
 }
 
-std::string manifest(const Bundle* b, int rev) {
+std::string manifest(const Bundle* b, int rev, bool receiveAuth, bool receiveOk) {
     std::string j = "{\"v\":2,\"rev\":" + std::to_string(rev) + ",\"pc\":\"" + util::json_escape(g_pcName) +
-                    "\",\"chunk\":" + std::to_string(UPLOAD_CHUNK);
+                    "\",\"chunk\":" + std::to_string(UPLOAD_CHUNK) +
+                    ",\"receiveAuth\":" + (receiveAuth ? "true" : "false") +
+                    ",\"receiveOk\":" + (receiveOk ? "true" : "false");
     if (!b) return j + ",\"ready\":true,\"prep\":1,\"total\":0,\"files\":[],\"texts\":[],\"zip\":{\"name\":\"\",\"size\":0,\"preferred\":false}}";
     bool ready = b->ready;
     double prep = ready ? 1.0 : b->totalBytes ? std::min(0.99, (double)b->prepDone / (double)b->totalBytes) : 0.0;
@@ -428,6 +448,7 @@ bool HttpServer::start(int preferredPort, bool loopbackOnly) {
 }
 
 void HttpServer::stop() {
+    stopPcShare();
     if (!running_.exchange(false)) return;
     if (acceptThread_.joinable()) acceptThread_.join();
     plat::tcp_close(listen_);
@@ -452,6 +473,47 @@ void HttpServer::publish(std::shared_ptr<Bundle> bundle) {
     std::lock_guard<std::mutex> l(mu_);
     bundle_ = std::move(bundle);
     rev_++;
+}
+
+void HttpServer::setReceiveCode(const std::string& code) {
+    std::lock_guard<std::mutex> l(mu_);
+    receiveCode_ = code;
+    for (auto& [id, session] : sessions_) {
+        session->receiveAuthorized = code.empty();
+        session->authFailures = 0;
+    }
+}
+
+std::string HttpServer::startPcShare(std::shared_ptr<Bundle> bundle) {
+    stopPcShare();
+    if (!bundle || !bundle->ready || (bundle->files.empty() && bundle->dirs.empty()) ||
+        std::any_of(bundle->files.begin(), bundle->files.end(), [](const auto& f) { return f.missing; })) return {};
+    auto offer = std::make_shared<PcOffer>();
+    offer->bundle = std::move(bundle);
+    offer->token = util::random_token(24);
+    std::lock_guard<std::mutex> l(mu_);
+    pcOffer_ = offer;
+    return offer->token;
+}
+
+void HttpServer::stopPcShare() {
+    std::lock_guard<std::mutex> l(mu_);
+    if (pcOffer_) {
+        pcOffer_->active = false;
+        if (pcOffer_->socket != plat::BAD_SOCK) plat::tcp_shutdown(pcOffer_->socket);
+    }
+    pcOffer_.reset();
+}
+
+bool HttpServer::pcShareComplete() const {
+    std::lock_guard<std::mutex> l(mu_);
+    return pcOffer_ && pcOffer_->complete;
+}
+
+bool HttpServer::pcAwaitingReceipt() const {
+    std::lock_guard<std::mutex> l(mu_);
+    return pcOffer_ && pcOffer_->active && pcOffer_->streamed && !pcOffer_->receiver.empty() &&
+        plat::tick_ms() - pcOffer_->claimAt < 30000;
 }
 
 std::string HttpServer::token() const {
@@ -574,6 +636,7 @@ std::vector<TransferInfo> HttpServer::transfers() const {
         i.ok = t->ok;
         i.viaTunnel = t->viaTunnel;
         i.incoming = t->incoming;
+        i.pc = t->pc;
         i.start = t->start;
         i.end = t->end;
         v.push_back(std::move(i));
@@ -587,13 +650,14 @@ std::string HttpServer::lastDevice() const {
 }
 
 std::shared_ptr<HttpServer::Transfer> HttpServer::begin(const std::string& name, const std::string& device,
-                                                        uint64_t total, bool tunnel, bool incoming) {
+                                                        uint64_t total, bool tunnel, bool incoming, bool pc) {
     auto t = std::make_shared<Transfer>();
     t->name = name;
     t->device = device;
     t->total = total;
     t->viaTunnel = tunnel;
     t->incoming = incoming;
+    t->pc = pc;
     t->start = plat::tick_ms();
     {
         std::lock_guard<std::mutex> l(mu_);
@@ -719,6 +783,8 @@ bool HttpServer::handle(plat::Sock s, const Req& r, std::string& buf, bool viaTu
         return simple(s, 204, head, keep, "Access-Control-Allow-Origin: *\r\n");
     }
 
+    if (r.path.rfind("/pc/", 0) == 0) return handlePc(s, r, buf, viaTunnel, bodyLen);
+
     // Phone session: /s/<id>/...
     if (r.path.rfind("/s/", 0) == 0) {
         size_t slash = r.path.find('/', 3);
@@ -773,6 +839,123 @@ bool HttpServer::handle(plat::Sock s, const Req& r, std::string& buf, bool viaTu
     return simple(s, 404, head, keep);
 }
 
+bool HttpServer::handlePc(plat::Sock s, const Req& r, std::string& buf, bool viaTunnel, uint64_t bodyLen) {
+    // The tunnel connects over loopback. PC offers are LAN-only and independent
+    // of the rotating phone token and the phone's published bundle.
+    if (viaTunnel || r.method != "GET" || bodyLen) return simple(s, 404, false, false);
+    if (!drain(s, buf, bodyLen)) return false;
+    size_t slash = r.path.find('/', 4);
+    if (slash == std::string::npos) return simple(s, 404, false, false);
+    auto token = r.path.substr(4, slash - 4), action = r.path.substr(slash + 1);
+    auto receiver = r.h("x-pocketdrop-receiver");
+    std::shared_ptr<PcOffer> offer;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        if (pcOffer_ && tokenMatch(pcOffer_->token, token.data(), token.size())) offer = pcOffer_;
+        if (offer && offer->active && offer->socket == plat::BAD_SOCK && !offer->receiver.empty() &&
+            plat::tick_ms() - offer->claimAt >= 30000) {
+            offer->receiver.clear(); offer->streamed = false;
+        }
+    }
+    if (!offer) return simple(s, 404, false, false);
+    const auto& b = offer->bundle;
+    bool zipped = b->zipPreferred || b->files.size() != 1;
+    std::string name = safeName(zipped ? b->zipName : b->files[0].name);
+    uint64_t size = zipped ? b->zipBytes : b->files[0].size;
+    if (action == "info") {
+        if (!offer->active) return simple(s, 404, false, false);
+        std::string info = "PDPC1\n" + std::to_string(size) + "\n" + name;
+        sendAll(s, header(200, "application/octet-stream", info.size(), false, "Cache-Control: no-store\r\n") + info);
+        return false;
+    }
+    if (receiver.size() != 32 || receiver.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
+        return simple(s, 400, false, false);
+    if (action == "verify" || action == "complete" || action == "cancel" || action == "keepalive") {
+        int status = 404;
+        bool completed = false;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (offer->receiver == receiver) {
+                offer->claimAt = plat::tick_ms();
+                if (action == "keepalive" && offer->active) {
+                    status = 204;
+                } else if (action == "cancel" && offer->active) {
+                    if (offer->socket != plat::BAD_SOCK) plat::tcp_shutdown(offer->socket);
+                    else { offer->receiver.clear(); offer->streamed = false; }
+                    status = 204;
+                } else if (action != "cancel" && (offer->active || offer->complete)) {
+                    auto crc = queryParam(r.query, "crc");
+                    bool valid = !crc.empty() && crc.size() <= 10 && crc.find_first_not_of("0123456789") == std::string::npos;
+                    uint64_t value = valid ? std::strtoull(crc.c_str(), nullptr, 10) : UINT64_MAX;
+                    status = !offer->streamed ? 409 : value != offer->crc ? 422 : 204;
+                    if (status == 204 && action == "complete" && !offer->complete) {
+                        offer->complete = true;
+                        offer->active = false;
+                        completed = true;
+                    }
+                }
+            }
+        }
+        if (completed && onEvent) onEvent(Event::PcComplete);
+        return simple(s, status, false, false);
+    }
+    if (action != "file") return simple(s, 404, false, false);
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        if (!offer->active) return simple(s, 404, false, false);
+        if (!offer->receiver.empty()) return simple(s, 409, false, false);
+        offer->receiver = receiver;
+        offer->socket = s;
+        offer->streamed = false;
+        offer->claimAt = plat::tick_ms();
+    }
+    std::string device = r.h("x-pocketdrop-name");
+    device.erase(std::remove_if(device.begin(), device.end(), [](unsigned char c) { return c < 32 || c == 127; }), device.end());
+    if (device.empty()) device = "PC";
+    if (device.size() > 96) device.resize(96);
+    auto transfer = begin(name, device, size, false, false, true);
+    uint32_t crc = 0;
+    bool ok = sendAll(s, header(200, "application/octet-stream", size, false, "Cache-Control: no-store\r\n"));
+    auto transmit = [&](const uint8_t* data, size_t n) {
+        while (n) {
+            size_t count = std::min(n, IO_CHUNK);
+            if (!running_ || !offer->active || !sendAll(s, (const char*)data, count, &transfer->sent)) return false;
+            crc = crc32_update(crc, data, count);
+            data += count; n -= count;
+        }
+        return true;
+    };
+    std::vector<uint8_t> io(IO_CHUNK);
+    auto file = [&](const BundleFile& f, uint64_t offset, uint64_t count) {
+        auto input = plat::file_open_read(f.path);
+        bool good = input != plat::BAD_FILE && plat::file_size(input) == (int64_t)f.size && plat::file_seek(input, offset);
+        while (good && count) {
+            auto got = plat::file_read(input, io.data(), (size_t)std::min<uint64_t>(count, io.size()));
+            if (got <= 0) { good = false; break; }
+            good = transmit(io.data(), (size_t)got);
+            count -= (uint64_t)got;
+        }
+        if (input != plat::BAD_FILE) plat::file_close(input);
+        return good;
+    };
+    if (ok && zipped) {
+        for (const auto& seg : b->plan().segs) {
+            ok = seg.mem ? transmit(seg.mem, (size_t)seg.len) : file(b->files[(size_t)seg.file], 0, seg.len);
+            if (!ok) break;
+        }
+    } else if (ok) ok = file(b->files[0], 0, size);
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        offer->socket = plat::BAD_SOCK;
+        offer->streamed = ok;
+        offer->crc = crc;
+        offer->claimAt = plat::tick_ms();
+        if (!ok) offer->receiver.clear();
+    }
+    end(transfer, ok);
+    return false;
+}
+
 bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, bool viaTunnel, Session& session,
                                const std::string& rest, uint64_t bodyLen) {
     bool head = r.method == "HEAD";
@@ -784,6 +967,48 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
         std::lock_guard<std::mutex> l(mu_);
         b = bundle_;
         rev = rev_;
+    }
+
+    if (r.method == "POST" && rest == "/auth") {
+        if (bodyLen > 32) return json(s, 413, "{\"error\":\"code\"}", false);
+        std::string code;
+        if (!readBody(s, buf, bodyLen, [&](const char* p, size_t n) { code.append(p, n); })) return false;
+        code.erase(std::remove_if(code.begin(), code.end(), [](unsigned char c) { return c == '-' || std::isspace(c); }),
+                   code.end());
+        std::transform(code.begin(), code.end(), code.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+        int status = 401;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (receiveCode_.empty()) {
+                session.receiveAuthorized = true;
+                session.authFailures = 0;
+                status = 204;
+            } else if (session.authFailures >= 8) {
+                status = 429;
+            } else if (tokenMatch(receiveCode_, code.data(), code.size())) {
+                session.receiveAuthorized = true;
+                session.authFailures = 0;
+                status = 204;
+            } else if (++session.authFailures >= 8) {
+                status = 429;
+            }
+        }
+        return status == 204 ? simple(s, 204, false, keep)
+                             : json(s, status, status == 429 ? "{\"error\":\"locked\"}" : "{\"error\":\"code\"}", keep);
+    }
+
+    bool receiveRoute = (r.method == "POST" && (rest == "/up" || rest == "/text")) ||
+                        (rest.rfind("/up/", 0) == 0 && (r.method == "PUT" || r.method == "GET" || r.method == "DELETE"));
+    if (receiveRoute) {
+        bool allowed;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            allowed = receiveCode_.empty() || session.receiveAuthorized;
+        }
+        if (!allowed) {
+            if (!drain(s, buf, bodyLen)) return false;
+            return json(s, 401, "{\"error\":\"auth\"}", keep);
+        }
     }
 
     // ---- phone -> computer
@@ -920,7 +1145,13 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
     }
 
     if (rest == "/api/manifest") {
-        std::string j = manifest(b.get(), rev);
+        bool receiveAuth, receiveOk;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            receiveAuth = !receiveCode_.empty();
+            receiveOk = !receiveAuth || session.receiveAuthorized;
+        }
+        std::string j = manifest(b.get(), rev, receiveAuth, receiveOk);
         std::string h = header(200, "application/json; charset=utf-8", j.size(), keep, "Cache-Control: no-store\r\n");
         return sendAll(s, head ? h : h + j) && keep;
     }

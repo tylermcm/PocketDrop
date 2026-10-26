@@ -83,9 +83,11 @@ bool D2DGfx::begin(HWND hwnd, float dpi) {
         GetClientRect(hwnd, &cr);
         auto props = D2D1::RenderTargetProperties();
         props.dpiX = props.dpiY = dpi;
+        ComPtr<ID2D1HwndRenderTarget> target;
         if (FAILED(d2d_->CreateHwndRenderTarget(
-                props, D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(cr.right, cr.bottom)), &rt_)))
+                props, D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(cr.right, cr.bottom)), &target)))
             return false;
+        rt_ = target;
         rt_->CreateSolidColorBrush(D2D1::ColorF(0), &brush_);
         gen_++;
     }
@@ -103,8 +105,40 @@ void D2DGfx::end() {
 }
 
 void D2DGfx::resize(UINT w, UINT h) {
-    if (rt_) rt_->Resize(D2D1::SizeU(w, h));
+    ComPtr<ID2D1HwndRenderTarget> target;
+    if (rt_ && SUCCEEDED(rt_.As(&target))) target->Resize(D2D1::SizeU(w, h));
 }
+
+#ifdef POCKETDROP_RENDER_TEST
+bool D2DGfx::beginBitmap(UINT width, UINT height, float dpi) {
+    brush_.Reset(); rt_.Reset(); bitmap_.Reset();
+    dpi_ = dpi;
+    if (!wic_ || FAILED(wic_->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap_))) return false;
+    auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE);
+    props.dpiX = props.dpiY = dpi;
+    if (FAILED(d2d_->CreateWicBitmapRenderTarget(bitmap_.Get(), props, &rt_))) return false;
+    rt_->CreateSolidColorBrush(D2D1::ColorF(0), &brush_);
+    gen_++;
+    rt_->BeginDraw();
+    return true;
+}
+
+bool D2DGfx::saveBitmap(const wchar_t* path) {
+    if (!rt_ || FAILED(rt_->EndDraw())) return false;
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    UINT width = 0, height = 0;
+    auto format = GUID_WICPixelFormat32bppBGRA;
+    return SUCCEEDED(bitmap_->GetSize(&width, &height)) && SUCCEEDED(wic_->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+        SUCCEEDED(wic_->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+        SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+        SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) && SUCCEEDED(frame->Initialize(nullptr)) &&
+        SUCCEEDED(frame->SetSize(width, height)) && SUCCEEDED(frame->SetPixelFormat(&format)) &&
+        SUCCEEDED(frame->WriteSource(bitmap_.Get(), nullptr)) && SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+#endif
 
 void D2DGfx::setDpi(float dpi) {
     dpi_ = dpi;

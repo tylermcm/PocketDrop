@@ -16,7 +16,7 @@ struct TransferInfo {
     std::string name, device;
     uint64_t total = 0, sent = 0;
     bool done = false, ok = false, viaTunnel = false;
-    bool incoming = false;       // phone -> computer
+    bool incoming = false, pc = false;
     uint64_t start = 0, end = 0; // plat::tick_ms()
 };
 
@@ -42,7 +42,7 @@ struct Req;
 
 class HttpServer {
 public:
-    enum class Event { Visit, TransferStart, TransferEnd, Received };
+    enum class Event { Visit, TransferStart, TransferEnd, Received, PcComplete };
     std::function<void(Event)> onEvent; // invoked on worker threads
 
     ~HttpServer() { stop(); }
@@ -63,6 +63,11 @@ public:
     bool phoneConnected() const;
 
     void setInbox(const std::string& dir); // where received files are saved
+    void setReceiveCode(const std::string& code); // empty disables phone -> computer authorization
+    std::string startPcShare(std::shared_ptr<Bundle> bundle);
+    void stopPcShare();
+    bool pcShareComplete() const;
+    bool pcAwaitingReceipt() const;
     std::vector<ReceivedItem> takeReceived(); // items that arrived since the last call
 
     std::vector<TransferInfo> transfers() const;
@@ -75,6 +80,7 @@ public:
     struct Transfer;
     struct Session;
     struct Upload;
+    struct PcOffer;
 
 private:
     void acceptLoop();
@@ -82,8 +88,9 @@ private:
     bool handle(plat::Sock s, const Req& r, std::string& buf, bool viaTunnel);
     bool handleSession(plat::Sock s, const Req& r, std::string& buf, bool viaTunnel, Session& session,
                        const std::string& rest, uint64_t bodyLen);
+    bool handlePc(plat::Sock s, const Req& r, std::string& buf, bool viaTunnel, uint64_t bodyLen);
     std::shared_ptr<Transfer> begin(const std::string& name, const std::string& device, uint64_t total, bool tunnel,
-                                    bool incoming);
+                                    bool incoming, bool pc = false);
     void end(const std::shared_ptr<Transfer>& t, bool ok);
     std::shared_ptr<Upload> findUpload(const std::string& id, const std::string& sid);
     void abortUpload(const std::shared_ptr<Upload>& u);        // caller holds u->io
@@ -105,6 +112,8 @@ private:
     std::map<std::string, std::shared_ptr<Session>> sessions_;
     std::map<std::string, std::shared_ptr<Upload>> uploads_;
     std::string inbox_;
+    std::string receiveCode_;
+    std::shared_ptr<PcOffer> pcOffer_;
     std::vector<ReceivedItem> received_;
     uint64_t nextReceivedId_ = 1;
     std::set<plat::Sock> clients_;
