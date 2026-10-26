@@ -340,9 +340,9 @@ void createWindow(App* app, const std::vector<std::string>& initial) {
     app->shell.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app->shell.window), "PocketDrop");
     GdkRectangle work{0, 0, 1920, 1080};
-    GdkDisplay* display = gdk_display_get_default();
-    GdkMonitor* monitor = gdk_display_get_primary_monitor(display);
-    if (!monitor && gdk_display_get_n_monitors(display)) monitor = gdk_display_get_monitor(display, 0);
+    GdkDisplay* workDisplay = gdk_display_get_default();
+    GdkMonitor* monitor = gdk_display_get_primary_monitor(workDisplay);
+    if (!monitor && gdk_display_get_n_monitors(workDisplay)) monitor = gdk_display_get_monitor(workDisplay, 0);
     if (monitor) gdk_monitor_get_workarea(monitor, &work);
     gtk_window_set_default_size(GTK_WINDOW(app->shell.window), std::min(400, work.width), std::min(672, work.height - 40));
     gtk_window_set_resizable(GTK_WINDOW(app->shell.window), TRUE);
