@@ -34,12 +34,18 @@ struct CurlCtx {
     std::string* body;
     const std::function<bool(uint64_t, uint64_t)>* progress;
     bool writeErr = false;
+    const plat::BodySink* sink = nullptr;
 };
 
 size_t curlWrite(char* p, size_t sz, size_t n, void* ud) {
     auto* c = (CurlCtx*)ud;
     size_t len = sz * n;
-    if (c->out != plat::BAD_FILE) {
+    if (c->sink && *c->sink) {
+        if (!(*c->sink)((const uint8_t*)p, len)) {
+            c->writeErr = true;
+            return 0;
+        }
+    } else if (c->out != plat::BAD_FILE) {
         if (!plat::file_write(c->out, p, len)) {
             c->writeErr = true;
             return 0;
@@ -371,7 +377,7 @@ std::vector<uint8_t> thumbnail_jpeg(const std::string& path, int maxSide) {
 
 // ---- HTTP client
 HttpResult http_get(const std::string& url, const std::vector<std::string>& headers, File out,
-                    const std::function<bool(uint64_t, uint64_t)>& progress, int timeoutMs) {
+                    const std::function<bool(uint64_t, uint64_t)>& progress, int timeoutMs, const BodySink& sink) {
     static std::once_flag once;
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
     HttpResult res;
@@ -381,6 +387,7 @@ HttpResult http_get(const std::string& url, const std::vector<std::string>& head
         return res;
     }
     CurlCtx ctx{out, &res.body, &progress};
+    ctx.sink = &sink;
     curl_slist* hl = nullptr;
     for (const auto& x : headers) hl = curl_slist_append(hl, x.c_str());
     curl_easy_setopt(h, CURLOPT_URL, url.c_str());
@@ -392,7 +399,7 @@ HttpResult http_get(const std::string& url, const std::vector<std::string>& head
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, (long)timeoutMs);
-    if (out == BAD_FILE) curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
+    if (out == BAD_FILE && !sink) curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
     else {
         curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
         curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, (long)std::max(1, timeoutMs / 1000));

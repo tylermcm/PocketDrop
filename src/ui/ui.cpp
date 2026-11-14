@@ -472,6 +472,17 @@ void Ui::showNearby() {
 
 void Ui::pcAction() {
     if (pcMode_ == PcMode::Send) {
+        auto pairing = server_.pcPairing();
+        if (pairing.pending) {
+            // The codes on both screens must match before anything is sent; a mismatch means someone else is in between.
+            std::vector<MenuItem> items = {{1, "Allow " + pairing.name + " (code " + pairing.code + ")"}, {2, "Decline"}};
+            auto L = layout();
+            int cmd = shell_.popupMenu(items, L.cardButton.right, L.cardButton.bottom);
+            if (cmd == 1) server_.pcAnswer(true);
+            else if (cmd == 2) server_.pcAnswer(false);
+            invalidate();
+            return;
+        }
         if (paths_.empty()) browse(false);
         else if (pcSent_) startPcSend();
         else stopPc();
@@ -616,6 +627,9 @@ void Ui::onServer(HttpServer::Event ev) {
     }
     case HttpServer::Event::Received: onReceived(); break;
     case HttpServer::Event::PcComplete: pollPc(); break;
+    case HttpServer::Event::PcPair:
+        if (server_.pcPairing().pending) shell_.attention();
+        break;
     case HttpServer::Event::DevicesChanged:
         shell_.saveString("TrustedPhones", persist::serialize(server_.trustedDevices()));
         break;
@@ -736,7 +750,7 @@ void Ui::updateAnimation() {
     auto st = tunnel_ ? tunnel_->state() : Tunnel::State::Off;
     auto hotspotState = hotspot_ ? hotspot_->state() : plat::HotspotState::Off;
     bool pcBusy = pcMode_ == PcMode::Receive && pcStarted_ &&
-        (pcDownload_.phase == PcDownload::Phase::Connecting || pcDownload_.phase == PcDownload::Phase::Receiving || pcDownload_.phase == PcDownload::Phase::Verifying);
+        (pcDownload_.phase == PcDownload::Phase::Connecting || pcDownload_.phase == PcDownload::Phase::Pairing || pcDownload_.phase == PcDownload::Phase::Receiving || pcDownload_.phase == PcDownload::Phase::Verifying);
     bool busy = pcBusy || building_ || (bundle_ && !bundle_->ready) || st == Tunnel::State::Starting ||
                 st == Tunnel::State::Downloading || hotspotState == plat::HotspotState::Starting ||
                 std::any_of(transfers_.begin(), transfers_.end(), [](const TransferInfo& t) { return !t.done; });
@@ -1104,11 +1118,16 @@ void Ui::paintPc(Gfx& g, const Layout& L) {
     if (pcMode_ == PcMode::Send) {
         const TransferInfo* transfer = nullptr;
         for (const auto& t : transfers_) if (t.pc) transfer = &t;
-        action = pcSent_ ? "Send again" : paths_.empty() ? "Choose files" : "Stop sharing";
+        auto pairing = server_.pcPairing();
+        action = pcSent_ ? "Send again" : pairing.pending ? "Allow or decline" : paths_.empty() ? "Choose files" : "Stop sharing";
         if (pcSent_) {
             title = "Sent successfully";
             detail = transfer ? transfer->name : "Your transfer is complete";
             sub = "The PC transfer is now closed";
+        } else if (pairing.pending) {
+            title = "Code " + pairing.code;
+            detail = pairing.name + " wants to receive";
+            sub = "Allow only if the other PC shows the same code";
         } else if (transfer && !transfer->done) {
             title = "Sending to " + transfer->device;
             detail = transfer->name;
@@ -1147,6 +1166,11 @@ void Ui::paintPc(Gfx& g, const Layout& L) {
             detail = pcDownload_.name.empty() ? pcDownload_.device : pcDownload_.name;
             switch (pcDownload_.phase) {
             case Phase::Connecting: title = "Connecting to " + pcDownload_.device; break;
+            case Phase::Pairing:
+                title = "Code " + pcDownload_.code;
+                detail = "Confirm it matches on " + pcDownload_.device;
+                sub = "Waiting for the sender to accept";
+                break;
             case Phase::Receiving:
                 title = "Receiving from " + pcDownload_.device;
                 progress = pcDownload_.total ? (double)pcDownload_.received / pcDownload_.total : 0;
@@ -1207,10 +1231,10 @@ void Ui::paint(Gfx& g) {
     uint32_t dot;
     if (pcMode_ != PcMode::Phone) {
         bool sending = std::any_of(transfers_.begin(), transfers_.end(), [](const auto& t) { return t.pc && !t.done; });
-        status = pcMode_ == PcMode::Send ? (pcSent_ ? "Sent" : sending ? "Sending" : "PC Send") :
+        status = pcMode_ == PcMode::Send ? (pcSent_ ? "Sent" : sending ? "Sending" : server_.pcPairing().pending ? "Confirm code" : "PC Send") :
             pcReceived_ ? "Received" : !pcStarted_ ? "PC Receive" : pcDownload_.phase == PcDownload::Phase::Failed ? "Interrupted" :
             pcDownload_.phase == PcDownload::Phase::Cancelled ? "Cancelled" : pcDownload_.phase == PcDownload::Phase::Verifying ? "Checking" :
-            pcDownload_.phase == PcDownload::Phase::Connecting ? "Connecting" : "Receiving";
+            pcDownload_.phase == PcDownload::Phase::Connecting ? "Connecting" : pcDownload_.phase == PcDownload::Phase::Pairing ? "Confirm code" : "Receiving";
         dot = pcReceived_ || pcSent_ ? GREEN : ACC2;
         if (pcMode_ == PcMode::Receive && pcDownload_.phase == PcDownload::Phase::Failed) dot = RED;
     } else if ((mode_ == 1 && tunnel_->state() == Tunnel::State::Failed) ||
@@ -1741,6 +1765,10 @@ void Ui::command(const std::string& name, const std::string& arg) {
             refreshBinding();
             refreshQr();
         }
+    } else if (name == "pc_allow") {
+        server_.pcAnswer(true);
+    } else if (name == "pc_decline") {
+        server_.pcAnswer(false);
     } else if (name == "history_open") {
         openHistory(std::atoi(arg.c_str()));
     } else if (name == "menu") {
@@ -1950,7 +1978,9 @@ std::string Ui::stateJson() {
 
     std::string j = "{";
     j += "\"pc\":{\"mode\":" + std::to_string((int)pcMode_) + ",\"sent\":" + jbool(pcSent_) +
-         ",\"phase\":" + std::to_string((int)pcDownload_.phase) + ",\"name\":" + jstr(pcDownload_.name) +
+         ",\"phase\":" + std::to_string((int)pcDownload_.phase) + ",\"code\":" + jstr(pcDownload_.code) +
+         ",\"pair\":{\"pending\":" + jbool(server_.pcPairing().pending) + ",\"name\":" + jstr(server_.pcPairing().name) +
+         ",\"code\":" + jstr(server_.pcPairing().code) + "},\"name\":" + jstr(pcDownload_.name) +
          ",\"error\":" + jstr(pcDownload_.error) + ",\"received\":" + std::to_string(pcDownload_.received) +
          ",\"total\":" + std::to_string(pcDownload_.total) + "},";
     j += "\"mode\":" + std::to_string(mode_) + ",\"offline\":" + jbool(offlineShown);

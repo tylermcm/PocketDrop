@@ -24,13 +24,17 @@ Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or ac
   - The file list shows available thumbnails for photos, videos and PDFs using each desktop platform's native image services.
   - Buttons: per-file download, **Download all**, copy (and open, for links) on shared text, and **Save to Photos** over HTTPS.
   - Updates live as you add files and adapts to light or dark mode.
+- **Remembered phones**: tick **Remember this phone** when entering the receive code and that phone skips the code next time it opens a link from the same address. It proves itself by answering a fresh challenge with an HMAC, so its secret is never sent again. Entries expire after 30 days unused; **Forget remembered phones** in the menu removes them all.
+- **Transfer history**: received files, notes, files phones downloaded and PC Share receipts are listed under **Transfer history** and survive restarts. Choose an entry to show its file in the folder or copy its note; **Clear history** empties it.
+- **Notes to the clipboard**: the **Copy phone notes to the clipboard** option puts every note a phone sends straight on this computer's clipboard.
+- **Checked uploads**: the phone page sends a CRC-32 with every chunk and, when chunks went out in order, with the whole file. A damaged chunk is sent again and a file that does not match is discarded rather than saved.
 - **Desktop**:
   - Resizable window that fits the monitor's work area, including laptop screens at high DPI. Windows remembers its size.
   - Live transfer progress and speed, plus a "phone connected" indicator.
   - "Stop sharing after a download", **New link** (revokes the old one), network address picker, always on top.
   - Optional **Send to â†’ PocketDrop** shortcut. The app is single-instance, so Send to adds to the open window.
-- **Native PC Share**: on PC A choose **PC Share → Send**, then select or drop files. On PC B choose **PC Share → Receive**. A single waiting sender connects automatically; choose a computer by name when several are sending. Transfers show progress and speed, support cancellation, save directly to the received-files folder, and close after the receiver confirms completion. One file arrives as itself; folders or multiple files arrive as a ZIP. No browser, copied link, or code entry.
-- **Offline (Windows)**: create a temporary Wi-Fi hotspot, or use Bluetooth tethering when no Wi-Fi adapter is available. Recovered from the Image Triage integration; availability depends on the adapter and driver.
+- **Native PC Share**: on PC A choose **PC Share → Send**, then select or drop files. On PC B choose **PC Share → Receive**. A single waiting sender connects automatically; choose a computer by name when several are sending. Transfers show progress and speed, support cancellation, save directly to the received-files folder, and close after the receiver confirms completion. One file arrives as itself; folders or multiple files arrive as a ZIP. No browser, copied link, or code entry. Both PCs show a six-digit code from an X25519 key exchange; the sender allows the transfer only when the codes match, and everything is sent encrypted (ChaCha20-Poly1305).
+- **Offline**: create a temporary Wi-Fi hotspot. On Windows this can also use Bluetooth tethering when no Wi-Fi adapter is available. On Linux it uses NetworkManager (`nmcli`) and a Wi-Fi adapter, and is hidden when either is missing; starting it disconnects that adapter from its current Wi-Fi network. macOS has no scriptable hotspot, so Offline is not offered there. Availability depends on the adapter and driver.
 - **Windows installation and updates**: choose the portable `PocketDrop.exe` or `PocketDrop-Setup.exe`. The installer supports upgrades in place. Use **â‹¯ â†’ Check for updates** to download a newer published release, verify its SHA-256 digest, and launch its installer.
 
 ## Build
@@ -82,9 +86,11 @@ Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x
   - once something is shared, after 15 minutes with no phone activity. Phone sessions also end after 15 minutes idle, but never during a transfer.
 - Links also end when PocketDrop closes, when you choose **New link**, or after a download if that option is on.
 - Responses carry `Referrer-Policy: no-referrer` and a strict CSP. HTML and SVG previews are sandboxed.
-- Same Wi-Fi mode is plain HTTP on your LAN. Anywhere mode is HTTPS from the phone to Cloudflare, and then goes through the tunnel.
-- Anywhere uploads and notes require the receive code displayed on the desktop. Download access remains controlled by the random sharing link.
-- PC Share starts only when you choose Send or Receive. Send advertises a temporary PC offer on the LAN; phone link tokens are never advertised. Any PC on that LAN can receive a waiting offer, with one receiver at a time. The PC endpoint is unavailable through cloudflared. Stop sharing, return to Phone, change the selected files, or close PocketDrop to revoke the offer. A completed transfer closes automatically. The receiver checks the transferred bytes before saving and never overwrites an existing file.
+- Same Wi-Fi and Offline modes are plain HTTP on your LAN or hotspot. Anywhere mode is HTTPS from the phone to Cloudflare, and then goes through the tunnel.
+- The server listens on one address only: loopback for Anywhere, the network address chosen in the menu for Same Wi-Fi, the hotspot's own address for Offline. It never listens on every interface. Changing the address or mode ends every link, session and receive code.
+- Uploads and notes always require the receive code displayed on the desktop, in every mode; an empty code denies everything. Download access remains controlled by the random sharing link. On plain HTTP, someone who can capture your network traffic can read the code and the files, as with any LAN HTTP; use Anywhere (HTTPS) when that matters.
+- A remembered phone stores a random secret in its browser and on this computer; the secret is never repeated on the network after it is issued, but anyone who captured the moment it was issued over plain HTTP could use it until it expires or is forgotten.
+- PC Share starts only when you choose Send or Receive. Send advertises a temporary PC offer on the LAN; phone link tokens are never advertised. A PC that finds the offer must pair first: both PCs derive the same key and six-digit code from an X25519 exchange, and nothing is sent until the person at the sender allows that PC after checking that the codes match (different codes mean someone is in between). The file's name and size and all of its data are then sealed with ChaCha20-Poly1305 frames that fail on any change, reordering or cut-off, and only one receiver can pair at a time. The PC endpoint is unavailable through cloudflared. Stop sharing, return to Phone, change the selected files, or close PocketDrop to revoke the offer. A completed transfer closes automatically. The receiver checks the transferred bytes before saving and never overwrites an existing file.
 - Windows verifies the downloaded cloudflared executable's publisher signature. macOS validates its code-signing state. Linux checks that the official HTTPS download is a valid ELF executable before installing it in the user's application-data directory.
 
 ## Troubleshooting Anywhere mode
@@ -97,7 +103,7 @@ Output: `build/PocketDrop-linux-x86_64/PocketDrop` and `build/PocketDrop-linux-x
 
 | File | Purpose |
 |---|---|
-| `src/core/` | Bundling, compression, HTTP server, QR encoder, tunnel lifecycle, and platform interface |
+| `src/core/` | Bundling, compression, HTTP server, QR encoder, tunnel lifecycle, platform interface, and the crypto (`crypto.h`), PC Share pairing (`pc_secure.h`) and persistence (`persist.h`) helpers |
 | `src/ui/` | Shared app state, layout, painting, hit testing, and vector icons |
 | `src/win/` | Win32 windowing, Direct2D graphics, platform services, resources, and entry point |
 | `src/mac/` | AppKit windowing, Core Graphics, platform services, bundle metadata, and entry point |
@@ -111,7 +117,7 @@ All paths are relative to the phone session URL `/s/<session>/`:
 | Request | Purpose |
 |---|---|
 | `POST up?name=<name>&size=<bytes>` | Start an upload. Returns `{"id","received":0,"chunk"}`, or `507 {"error":"disk"}` when there isn't room. |
-| `PUT up/<id>?offset=<n>` | Write one chunk (â‰¤ 32 MB; the page uses 8 MB to stay under Cloudflare's 100 MB request limit). Re-sending a chunk is safe; an offset past what was received returns `409 {"received"}`. The final chunk returns `{"done":true,"name"}` with the saved name. |
+| `PUT up/<id>?offset=<n>&crc=<hex>[&fcrc=<hex>]` | Write one chunk (â‰¤ 32 MB; the page uses 8 MB to stay under Cloudflare's 100 MB request limit). Re-sending a chunk is safe; an offset past what was received returns `409 {"received"}`. The final chunk returns `{"done":true,"name"}` with the saved name. `crc` is the chunk's CRC-32 (eight hex digits); a mismatch returns `422 {"error":"checksum","received"}` and nothing is advanced. `fcrc` on the last chunk is the whole file's CRC-32; a mismatch returns `422 {"error":"file_checksum"}` and the partial file is deleted. |
 | `GET up/<id>` | Bytes received so far, for resuming after a dropped connection. |
 | `DELETE up/<id>` | Cancel and delete the partial file. |
 | `POST text` | Send a note (UTF-8 body, up to 1 MB). |
@@ -120,11 +126,28 @@ Partial files are written as `<name>.<id>.pdpart` in the received-files folder a
 
 When `api/manifest` reports `receiveAuth: true`, send `POST auth` with the displayed receive code as a plain UTF-8 body before using the upload or note endpoints. `204` means authorized, `401` means an incorrect code, and `429` means the session's attempts are exhausted.
 
+Every mode reports `receiveAuth: true`. Optional forms of `POST auth`:
+
+- `POST auth?remember=1` with the code: on success returns `200 {"device","secret"}` instead of `204`. The phone keeps both.
+- `POST auth?device=<id>` (empty body) returns `200 {"nonce"}`; then `POST auth?device=<id>&proof=<hex>` with `proof = HMAC-SHA-256(secret, nonce)` returns `204`. A nonce works once and for 60 seconds. Unknown devices, wrong proofs and replays return `401` and count against the same eight-attempt limit as wrong codes.
+
+## PC Share protocol (v2)
+
+All requests are `GET /pc/<offer>/<action>` on the sender, from a receiver on the same LAN (never through the tunnel):
+
+| Action | Purpose |
+|---|---|
+| `hello` | The receiver sends its X25519 public key in `X-PocketDrop-Key` (64 hex digits) and its name. The sender answers with its own public key. Both derive the key, a `claim` that names the pairing, and a six-digit code (`HMAC-SHA-256` over both public keys, see `src/core/pc_secure.h`). `409` if another PC is already pairing. |
+| `status` | `pending`, `accepted` or `declined`, sent with `X-PocketDrop-Receiver: <claim>`. The sender's person allows or declines after comparing the codes. |
+| `info` | The file name and size, sealed as one ChaCha20-Poly1305 message. |
+| `file` | The data as frames: 4-byte little-endian length (0 closes the stream), ciphertext, 16-byte tag; the nonce counts frames. Resumed transfers pair again. |
+| `verify`, `complete`, `keepalive`, `cancel` | Unchanged: the receiver reports the CRC-32 of what it saved, and the sender records the completion. |
+
 ## PC Share
 
 1. On the sending PC choose **PC Share → Send**. Add files or a folder, or use the files already in the list. Wait for **Waiting for receiver**.
-2. On the receiving PC choose **PC Share → Receive**. It connects automatically when one sender is waiting. With multiple senders, use **Choose sender**.
+2. On the receiving PC choose **PC Share → Receive**. It connects automatically when one sender is waiting. With multiple senders, use **Choose sender**. Both PCs then show the same six-digit code. On the sending PC choose **Allow or decline**, and allow only if the codes match; the file is not sent before that.
 3. Files save to the configured received-files folder (by default `Downloads/PocketDrop`). Use **Show in folder** when finished. Duplicate names get a numeric suffix. A folder or several files arrive as a ZIP, preserving the folder structure.
 4. The top tabs become **Send / Receive / Phone**. **Phone** returns to normal QR sharing. **Stop sharing** or **Cancel** ends an active PC operation. Interrupted transfers can be retried with Receive; cancellation removes the partial download.
 
-Both PCs need the updated build and the same Wi-Fi or wired LAN. Allow PocketDrop on private networks in Windows Firewall. Guest-network client isolation, VPNs and multicast filtering may prevent discovery. TCP serves both phone and PC transfers on port 47291 (or a fallback); UDP discovery uses `239.255.47.29:47292` with a one-hop limit. No additional hosting port is required. PC Share is LAN-only; Anywhere remains the phone/browser connection mode.
+Both PCs need this version (older builds cannot pair) and the same Wi-Fi or wired LAN. Allow PocketDrop on private networks in Windows Firewall. Guest-network client isolation, VPNs and multicast filtering may prevent discovery. TCP serves both phone and PC transfers on port 47291 (or a fallback); UDP discovery uses `239.255.47.29:47292` with a one-hop limit. No additional hosting port is required. PC Share is LAN-only; Anywhere remains the phone/browser connection mode.

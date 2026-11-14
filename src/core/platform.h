@@ -109,8 +109,12 @@ struct HttpResult {
 };
 // GET. The body streams to `out` when given; otherwise up to 64 KB is kept in `body`.
 // `progress` returning false cancels.
+// With a `sink`, body bytes go to it instead (it returns false to abort) and the request is treated as a
+// long download. A sink also sees the body of error responses, so judge `status` before trusting its data.
+using BodySink = std::function<bool(const uint8_t* data, size_t n)>;
 HttpResult http_get(const std::string& url, const std::vector<std::string>& headers, File out,
-                    const std::function<bool(uint64_t got, uint64_t total)>& progress, int timeoutMs);
+                    const std::function<bool(uint64_t got, uint64_t total)>& progress, int timeoutMs,
+                    const BodySink& sink = {});
 
 // ---- Child processes: stdout and stderr merged into one pipe
 struct Process;

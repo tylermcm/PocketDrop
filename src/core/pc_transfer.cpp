@@ -1,5 +1,6 @@
 #include "pc_transfer.h"
 #include "deflate.h"
+#include "pc_secure.h"
 #include "util.h"
 #include <algorithm>
 #include <charconv>
@@ -70,18 +71,63 @@ void PcReceiver::run(NearbyPeer peer, std::string inbox) {
     if (!token(peer.offer) || peer.port < 1 || peer.port > 65535 || peer.ip.empty() || peer.ip.size() > 15 ||
         peer.ip.find_first_not_of("0123456789.") != std::string::npos) { fail("Invalid sender address"); return; }
     const auto base = "http://" + peer.ip + ":" + std::to_string(peer.port) + "/pc/" + peer.offer + "/";
-    const auto receiver = util::random_token(24);
+    const auto receiver = util::random_token(24); // names the partial file; the pairing has its own claim
     auto host = plat::host_name();
     host.erase(std::remove_if(host.begin(), host.end(), [](unsigned char c) { return c < 32 || c == 127; }), host.end());
-    std::vector<std::string> headers = {"X-PocketDrop-Receiver: " + receiver, "X-PocketDrop-Name: " + host, "Connection: close"};
+
+    // Key exchange: send our public key, get theirs, and show the code both PCs derive.
+    uint8_t secret[32], pub[32], peerPub[32];
+    pcsecure::make_keypair(secret, pub);
+    auto hello = plat::http_get(base + "hello",
+                                {"X-PocketDrop-Receiver: " + receiver, "X-PocketDrop-Name: " + host,
+                                 "X-PocketDrop-Key: " + crypto::to_hex(pub, 32), "Connection: close"},
+                                plat::BAD_FILE, {}, 3000);
+    if (cancel_) { fail({}); return; }
+    if (hello.status == 409) { fail("Another PC is already receiving this transfer."); return; }
+    pcsecure::Keys keys;
+    bool keyOk = hello.status == 200 && hello.body.size() == 64;
+    if (keyOk) {
+        for (size_t i = 0; i < 32 && keyOk; i++) {
+            auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+            int hi = digit(hello.body[2 * i]), lo = digit(hello.body[2 * i + 1]);
+            keyOk = hi >= 0 && lo >= 0;
+            if (keyOk) peerPub[i] = (uint8_t)(hi << 4 | lo);
+        }
+    }
+    if (!keyOk || !pcsecure::derive(secret, peerPub, peerPub, pub, keys)) {
+        fail("The sender stopped sharing, couldn't be reached, or needs the updated PocketDrop. Try Receive again.");
+        return;
+    }
+    std::vector<std::string> headers = {"X-PocketDrop-Receiver: " + keys.claim, "X-PocketDrop-Name: " + host, "Connection: close"};
     auto control = [&](const std::string& action) {
         return plat::http_get(base + action, headers, plat::BAD_FILE, {}, 3000);
     };
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        state_.phase = PcDownload::Phase::Pairing;
+        state_.code = keys.code;
+    }
+    // The person at the sender compares the codes and accepts.
+    bool accepted = false;
+    for (uint64_t waited = 0; !cancel_ && waited < 120000; waited += 400) {
+        auto status = control("status");
+        if (status.status != 200) { fail("The sender stopped sharing or couldn't be reached. Try Receive again."); return; }
+        if (status.body == "declined") { control("cancel"); fail("The sender declined the transfer."); return; }
+        if (status.body == "accepted") { accepted = true; break; }
+        plat::sleep_ms(400);
+    }
+    if (cancel_) { control("cancel"); fail({}); return; }
+    if (!accepted) { control("cancel"); fail("The sender didn't accept in time. Choose Receive again."); return; }
+
     auto info = control("info");
-    std::string name;
+    std::string name, infoText;
     uint64_t size = 0;
     if (cancel_) { fail({}); return; }
-    if (info.status != 200 || !parseInfo(info.body, name, size)) { fail("The sender stopped sharing or couldn't be reached. Try Receive again."); return; }
+    if (info.status != 200 || !pcsecure::open_message(keys, info.body, infoText) || !parseInfo(infoText, name, size)) {
+        control("cancel");
+        fail("The sender stopped sharing or couldn't be reached. Try Receive again.");
+        return;
+    }
     plat::make_dir(inbox);
     uint64_t space = plat::free_disk_space(inbox);
     if (space != UINT64_MAX && (space < size || space - size < (16ull << 20))) { fail("Not enough disk space in the received-files folder."); return; }
@@ -93,16 +139,28 @@ void PcReceiver::run(NearbyPeer peer, std::string inbox) {
         state_.name = name; state_.total = size; state_.phase = PcDownload::Phase::Receiving;
     }
     plat::HttpResult response;
+    const uint64_t sealed = pcsecure::sealed_size(size);
+    bool streamIntact = false;
     for (int attempt = 0; attempt < 5; ++attempt) {
-        response = plat::http_get(base + "file", headers, output, [&](uint64_t got, uint64_t total) {
+        // The sender's frames are opened as they arrive, so the file on disk is already the plain data.
+        pcsecure::Decoder decoder(keys);
+        uint64_t plain = 0;
+        auto sink = [&](const uint8_t* data, size_t n) {
+            return decoder.push(data, n, [&](const uint8_t* p, size_t m) {
+                plain += m;
+                return plain <= size && plat::file_write(output, p, m);
+            });
+        };
+        response = plat::http_get(base + "file", headers, output, [&](uint64_t, uint64_t total) {
             std::lock_guard<std::mutex> lock(mu_);
-            state_.received = got;
+            state_.received = std::min(plain, size);
             // Small HTTP error bodies must retain their status (e.g. 409) so a
             // released receiver claim can be retried. Successful files still
             // require the exact advertised size and checksum before saving.
-            return !cancel_ && got <= std::max<uint64_t>(size, 4096) && (!total || total == size || total <= 4096);
-        }, 3000);
+            return !cancel_ && (!total || total == sealed || total <= 4096);
+        }, 3000, sink);
         plat::file_close(output);
+        streamIntact = decoder.complete() && plain == size;
         if (response.status != 409 || cancel_ || attempt == 4) break;
         // A cancelled receiver may still be unwinding its socket on the sender.
         plat::sleep_ms(100);
@@ -114,7 +172,7 @@ void PcReceiver::run(NearbyPeer peer, std::string inbox) {
         control("cancel");
         fail(message);
     };
-    if (cancel_ || response.status != 200 || plat::file_stat(partial).size != size) {
+    if (cancel_ || response.status != 200 || !streamIntact || plat::file_stat(partial).size != size) {
         discard(response.status == 409 ? "Another PC is already receiving this transfer." :
                 "Transfer interrupted. Choose Receive again to retry.");
         return;

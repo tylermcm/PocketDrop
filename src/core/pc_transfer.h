@@ -3,9 +3,11 @@
 #include <functional>
 
 struct PcDownload {
-    enum class Phase { Idle, Connecting, Receiving, Verifying, Done, Failed, Cancelled };
+    // Pairing is last so the numbers a host reads from stateJson keep their meaning.
+    enum class Phase { Idle, Connecting, Receiving, Verifying, Done, Failed, Cancelled, Pairing };
     Phase phase = Phase::Idle;
     std::string name, device, path, error;
+    std::string code; // six digits to compare with the sender's screen while Pairing
     uint64_t received = 0, total = 0;
 };
 

@@ -484,7 +484,7 @@ std::vector<uint8_t> thumbnail_jpeg(const std::string& path, int maxSide) {
 
 // ---- HTTP client
 HttpResult http_get(const std::string& url, const std::vector<std::string>& headers, File out,
-                    const std::function<bool(uint64_t, uint64_t)>& progress, int timeoutMs) {
+                    const std::function<bool(uint64_t, uint64_t)>& progress, int timeoutMs, const BodySink& sink) {
     HttpResult res;
     std::wstring wurl = wide(url);
     URL_COMPONENTS uc{sizeof uc};
@@ -535,7 +535,13 @@ HttpResult http_get(const std::string& url, const std::vector<std::string>& head
                     break;
                 }
                 if (n == 0) break;
-                if (out != BAD_FILE) {
+                if (sink) {
+                    if (!sink((const uint8_t*)buf.data(), n)) {
+                        res.err = "Disk write failed";
+                        res.status = 0;
+                        break;
+                    }
+                } else if (out != BAD_FILE) {
                     if (!file_write(out, buf.data(), n)) {
                         res.err = "Disk write failed";
                         res.status = 0;

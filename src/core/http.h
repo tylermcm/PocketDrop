@@ -51,7 +51,7 @@ struct Req;
 
 class HttpServer {
 public:
-    enum class Event { Visit, TransferStart, TransferEnd, Received, PcComplete, DevicesChanged };
+    enum class Event { Visit, TransferStart, TransferEnd, Received, PcComplete, DevicesChanged, PcPair };
     std::function<void(Event)> onEvent; // invoked on worker threads
 
     ~HttpServer() { stop(); }
@@ -77,6 +77,13 @@ public:
     void setTrustedDevices(std::vector<TrustedDevice> devices); // loaded from settings at start
     std::vector<TrustedDevice> trustedDevices() const;          // to save when Event::DevicesChanged fires
     void forgetDevices();
+    // A PC asked to receive the offer; the person at this PC accepts only if the codes match on both screens.
+    struct PcPairing {
+        bool pending = false;
+        std::string name, code;
+    };
+    PcPairing pcPairing() const;
+    void pcAnswer(bool accept);
     std::string startPcShare(std::shared_ptr<Bundle> bundle);
     void stopPcShare();
     bool pcShareComplete() const;
