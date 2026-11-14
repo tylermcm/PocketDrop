@@ -5,6 +5,7 @@
 #include "../core/qr.h"
 #include "../core/tunnel.h"
 #include "../core/nearby.h"
+#include "../core/persist.h"
 #include "../core/pc_transfer.h"
 #include "gfx.h"
 #include "shell.h"
@@ -99,6 +100,11 @@ private:
     friend struct UiRenderTest;
 #endif
     void menuCommand(int cmd);
+    void showHistory();
+    void openHistory(int newestFirst);
+    void addHistory(persist::HistoryEntry entry);
+    void saveHistory();
+    std::string historyJson() const;
     void showNearby();
     void startPcSend();
     void startPcReceive();
@@ -172,7 +178,8 @@ private:
     std::string listenAddress_; // the one address the server listens on
     qr::Code qr_;
 
-    bool topmost_ = false, burnAfter_ = false, autoAnywhere_ = false;
+    bool topmost_ = false, burnAfter_ = false, autoAnywhere_ = false, noteClipboard_ = false;
+    std::vector<persist::HistoryEntry> history_; // oldest first
 
     HitTarget hover_, pressed_;
     float scroll_ = 0, spin_ = 0;

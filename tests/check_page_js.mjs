@@ -32,3 +32,16 @@ for (const [sizeA, sizeB] of [[1, 1], [1000, 777], [1 << 20, 12345], [8388608, 1
 }
 if (hex8(255) !== "000000ff") throw new Error("hex8");
 console.log("Phone page checksums: OK");
+
+// The page's SHA-256/HMAC (for remembered phones on plain HTTP) must match Node's.
+import { createHmac, createHash } from "node:crypto";
+const shaCode = ["sha256", "hmacHex"].map(grab).join("\n");
+const { sha256, hmacHex } = new Function(`${shaCode}\nreturn {sha256,hmacHex}`)();
+for (const text of ["", "abc", "x".repeat(55), "x".repeat(56), "x".repeat(64), "pocketdrop ".repeat(100)]) {
+  const got = Buffer.from(sha256(new TextEncoder().encode(text))).toString("hex");
+  if (got !== createHash("sha256").update(text).digest("hex")) throw new Error(`page SHA-256 differs for length ${text.length}`);
+}
+for (const [key, msg] of [["k", "m"], ["a".repeat(48), "nonce0123456789abcdef"], ["b".repeat(100), "x"]]) {
+  if (hmacHex(key, msg) !== createHmac("sha256", key).update(msg).digest("hex")) throw new Error("page HMAC differs");
+}
+console.log("Phone page SHA-256/HMAC: OK");

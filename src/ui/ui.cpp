@@ -27,7 +27,12 @@ enum MenuId {
     ID_OPEN_INBOX,
     ID_CHANGE_INBOX,
     ID_NEARBY,
+    ID_HISTORY,
+    ID_HIST_CLEAR,
+    ID_NOTE_CLIP,
+    ID_FORGET_PHONES,
     ID_ADDR_BASE = 500,
+    ID_HIST_BASE = 700,
 };
 
 #ifdef __APPLE__
@@ -158,6 +163,9 @@ void Ui::start() {
     topmost_ = shell_.loadSetting("Topmost", 0) != 0;
     burnAfter_ = shell_.loadSetting("BurnAfter", 0) != 0;
     autoAnywhere_ = shell_.loadSetting("AutoAnywhere", 0) != 0;
+    noteClipboard_ = shell_.loadSetting("NoteClipboard", 0) != 0;
+    history_ = persist::parse_history(shell_.loadString("History", ""));
+    server_.setTrustedDevices(persist::parse_devices(shell_.loadString("TrustedPhones", "")));
     inbox_ = shell_.loadString("InboxDir", util::path_join(plat::downloads_dir(), "PocketDrop"));
 
     tunnel_ = std::make_unique<Tunnel>([this] { post([this] { refreshQr(); updateAnimation(); }); });
@@ -206,6 +214,7 @@ void Ui::saveSettings() {
     shell_.saveSetting("Topmost", topmost_);
     shell_.saveSetting("BurnAfter", burnAfter_);
     shell_.saveSetting("AutoAnywhere", autoAnywhere_);
+    shell_.saveSetting("NoteClipboard", noteClipboard_);
 }
 
 // ---------------------------------------------------------------- content
@@ -433,6 +442,16 @@ void Ui::pollPc() {
                 item.id = nextPcReceived_++;
                 item.path = pcDownload_.path; item.name = pcDownload_.name;
                 item.size = pcDownload_.total; item.device = pcDownload_.device; item.time = plat::unix_time();
+                {
+                    persist::HistoryEntry entry;
+                    entry.kind = persist::HistoryEntry::PcIn;
+                    entry.time = item.time;
+                    entry.size = item.size;
+                    entry.name = item.name;
+                    entry.device = item.device;
+                    entry.path = item.path;
+                    addHistory(std::move(entry));
+                }
                 received_.push_back(std::move(item));
                 scroll_ = 0;
                 shell_.attention();
@@ -580,6 +599,15 @@ void Ui::onServer(HttpServer::Event ev) {
             ended_.insert(t.id);
             if (!t.ok || t.incoming || t.pc) continue; // native PC completion requires the receiver's receipt
             doneText_ = "Sent " + t.name + " to " + t.device;
+            {
+                persist::HistoryEntry entry;
+                entry.kind = persist::HistoryEntry::SentToPhone;
+                entry.time = plat::unix_time();
+                entry.size = t.total;
+                entry.name = t.name;
+                entry.device = t.device;
+                addHistory(std::move(entry));
+            }
             doneAt_ = now;
             burn = burnAfter_;
         }
@@ -588,9 +616,65 @@ void Ui::onServer(HttpServer::Event ev) {
     }
     case HttpServer::Event::Received: onReceived(); break;
     case HttpServer::Event::PcComplete: pollPc(); break;
+    case HttpServer::Event::DevicesChanged:
+        shell_.saveString("TrustedPhones", persist::serialize(server_.trustedDevices()));
+        break;
     }
     updateAnimation();
     invalidate();
+}
+
+void Ui::addHistory(persist::HistoryEntry entry) {
+    history_.push_back(std::move(entry));
+    if (history_.size() > persist::MAX_HISTORY) history_.erase(history_.begin());
+    saveHistory();
+}
+
+void Ui::saveHistory() { shell_.saveString("History", persist::serialize(history_)); }
+
+namespace {
+const char* historyArrow(char kind) {
+    return kind == persist::HistoryEntry::SentToPhone ? "\xE2\x86\x92 " : kind == persist::HistoryEntry::NoteIn ? "\xE2\x9C\x8E " : "\xE2\x86\x93 ";
+}
+std::string historyTitle(const persist::HistoryEntry& e) {
+    if (e.kind == persist::HistoryEntry::NoteIn) {
+        std::string line = e.text.substr(0, e.text.find_first_of("\r\n"));
+        if (line.size() > 40) line = line.substr(0, 40) + "\xE2\x80\xA6";
+        return "Note: " + line;
+    }
+    return e.name;
+}
+} // namespace
+
+// Newest first; choosing a received file shows it in its folder, a note copies it.
+void Ui::showHistory() {
+    std::vector<MenuItem> items;
+    int64_t now = plat::unix_time();
+    for (size_t i = 0; i < history_.size() && i < 30; i++) {
+        const auto& e = history_[history_.size() - 1 - i];
+        bool actionable = e.kind != persist::HistoryEntry::SentToPhone;
+        items.push_back({ID_HIST_BASE + (int)i,
+                         std::string(historyArrow(e.kind)) + historyTitle(e) + "  \xC2\xB7  " + e.device + "  \xC2\xB7  " +
+                             persist::ago(now - e.time),
+                         false, actionable, false, {}});
+    }
+    items.push_back({0, "", false, true, true, {}});
+    items.push_back({ID_HIST_CLEAR, "Clear history", false, !history_.empty(), false, {}});
+    Layout L = layout();
+    menuCommand(shell_.popupMenu(items, L.menu.right, L.menu.bottom + 4));
+}
+
+void Ui::openHistory(int newestFirst) {
+    if (newestFirst < 0 || newestFirst >= (int)history_.size()) return;
+    const auto& e = history_[history_.size() - 1 - (size_t)newestFirst];
+    if (e.kind == persist::HistoryEntry::NoteIn) {
+        shell_.copyText(e.text);
+        doneText_ = "Copied the note";
+        doneAt_ = plat::tick_ms();
+    } else if (e.kind != persist::HistoryEntry::SentToPhone) {
+        if (!e.path.empty() && plat::file_stat(e.path).exists) shell_.revealPath(e.path);
+        else shell_.alert("Transfer history", e.name + " is no longer where it was saved.");
+    }
 }
 
 void Ui::onReceived() {
@@ -598,6 +682,19 @@ void Ui::onReceived() {
     if (items.empty()) return;
     for (auto& it : items) {
         doneText_ = it.isText ? "Received a note from " + it.device : "Received " + it.name + " from " + it.device;
+        persist::HistoryEntry entry;
+        entry.kind = it.isText ? persist::HistoryEntry::NoteIn : persist::HistoryEntry::FileIn;
+        entry.time = it.time ? it.time : plat::unix_time();
+        entry.size = it.size;
+        entry.name = it.isText ? std::string() : it.name;
+        entry.device = it.device;
+        entry.path = it.path;
+        entry.text = it.text;
+        addHistory(std::move(entry));
+        if (it.isText && noteClipboard_) {
+            shell_.copyText(it.text);
+            doneText_ = "Copied a note from " + it.device + " to the clipboard";
+        }
         received_.push_back(std::move(it));
     }
     doneAt_ = plat::tick_ms();
@@ -768,11 +865,15 @@ void Ui::showMenu() {
         net.submenu.push_back(item(ID_ADDR_BASE + (int)i, addrs_[i].ip + "   " + addrs_[i].adapter, (int)i == addrIndex_));
     items.push_back(net);
     items.push_back(item(ID_NEARBY, "PC Share..."));
+    items.push_back(item(ID_HISTORY, "Transfer history\xE2\x80\xA6", false, !history_.empty()));
     items.push_back(sep);
     items.push_back(item(ID_OPEN_INBOX, "Open received files folder"));
     items.push_back(item(ID_CHANGE_INBOX, "Change received files folder\xE2\x80\xA6"));
     items.push_back(sep);
     items.push_back(item(ID_BURN, "Stop sharing after a download", burnAfter_));
+    items.push_back(item(ID_NOTE_CLIP, "Copy phone notes to the clipboard", noteClipboard_));
+    size_t phones = server_.trustedDevices().size();
+    if (phones) items.push_back(item(ID_FORGET_PHONES, "Forget remembered phones (" + std::to_string(phones) + ")"));
     items.push_back(item(ID_WARN_ANY, "Warn before using Anywhere", !shell_.loadSetting("AnywhereRiskDismissed", 0)));
     items.push_back(item(ID_TOPMOST, "Always on top", topmost_));
     for (auto& extra : shell_.extraMenuItems()) items.push_back(extra);
@@ -794,6 +895,16 @@ void Ui::menuCommand(int cmd) {
     case ID_ADD_FOLDER: browse(true); break;
     case ID_PASTE: paste(); break;
     case ID_NEARBY: showNearby(); break;
+    case ID_HISTORY: showHistory(); break;
+    case ID_HIST_CLEAR:
+        history_.clear();
+        saveHistory();
+        break;
+    case ID_NOTE_CLIP:
+        noteClipboard_ = !noteClipboard_;
+        saveSettings();
+        break;
+    case ID_FORGET_PHONES: server_.forgetDevices(); break;
     case ID_COPY: copyLink(); break;
     case ID_OPEN_BROWSER:
         if (hasLink) shell_.openUrl(shareUrl());
@@ -844,7 +955,9 @@ void Ui::menuCommand(int cmd) {
                          "when PocketDrop closes.");
         break;
     default:
-        if (cmd >= ID_ADDR_BASE && cmd < ID_ADDR_BASE + (int)addrs_.size()) {
+        if (cmd >= ID_HIST_BASE && cmd < ID_HIST_BASE + 40) {
+            openHistory(cmd - ID_HIST_BASE);
+        } else if (cmd >= ID_ADDR_BASE && cmd < ID_ADDR_BASE + (int)addrs_.size()) {
             addrIndex_ = cmd - ID_ADDR_BASE;
             refreshBinding();
             refreshQr();
@@ -1628,15 +1741,31 @@ void Ui::command(const std::string& name, const std::string& arg) {
             refreshBinding();
             refreshQr();
         }
+    } else if (name == "history_open") {
+        openHistory(std::atoi(arg.c_str()));
     } else if (name == "menu") {
         static const std::map<std::string, int> ids = {
             {"open_inbox", ID_OPEN_INBOX},   {"change_inbox", ID_CHANGE_INBOX}, {"burn", ID_BURN},
             {"auto_any", ID_AUTO_ANY},       {"warn_any", ID_WARN_ANY},         {"topmost", ID_TOPMOST},
-            {"stop_tunnel", ID_STOP_TUNNEL}, {"about", ID_ABOUT}};
+            {"stop_tunnel", ID_STOP_TUNNEL}, {"about", ID_ABOUT},          {"note_clip", ID_NOTE_CLIP},
+            {"forget_phones", ID_FORGET_PHONES}, {"history_clear", ID_HIST_CLEAR}};
         auto it = ids.find(arg);
         if (it != ids.end()) menuCommand(it->second);
     }
     invalidate();
+}
+
+std::string Ui::historyJson() const {
+    std::string out = "[";
+    int64_t now = plat::unix_time();
+    for (size_t i = 0; i < history_.size() && i < 30; i++) {
+        const auto& e = history_[history_.size() - 1 - i];
+        if (i) out += ",";
+        out += "{\"i\":" + std::to_string(i) + ",\"kind\":" + jstr(std::string(1, e.kind)) + ",\"title\":" + jstr(historyTitle(e)) +
+               ",\"device\":" + jstr(e.device) + ",\"when\":" + jstr(persist::ago(now - e.time)) +
+               ",\"size\":" + std::to_string(e.size) + "}";
+    }
+    return out + "]";
 }
 
 std::string Ui::stateJson() {
@@ -1837,7 +1966,9 @@ std::string Ui::stateJson() {
     j += ",\"rows\":" + rows + ",\"sharing\":" + jbool(sharing());
     j += ",\"menu\":{\"burn\":" + jbool(burnAfter_) + ",\"auto\":" + jbool(autoAnywhere_) + ",\"warn\":" +
          jbool(!shell_.loadSetting("AnywhereRiskDismissed", 0)) + ",\"topmost\":" + jbool(topmost_) +
-         ",\"tunnelOpen\":" + jbool(tunnelOpen) + ",\"inbox\":" + jstr(inbox_) + ",\"addrs\":" + addrs + "}";
+         ",\"tunnelOpen\":" + jbool(tunnelOpen) + ",\"inbox\":" + jstr(inbox_) + ",\"addrs\":" + addrs +
+         ",\"noteClip\":" + jbool(noteClipboard_) + ",\"phones\":" + std::to_string(server_.trustedDevices().size()) +
+         ",\"history\":" + historyJson() + "}";
     j += ",\"busy\":" + jbool(animating_);
     j += ",\"recent\":" + jbool((copiedAt_ && now - copiedAt_ < 2500) || (doneAt_ && now - doneAt_ < 7000) ||
                                 (visitAt_ && now - visitAt_ < 125000) || (copiedRowAt_ && now - copiedRowAt_ < 2500));

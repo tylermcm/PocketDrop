@@ -1,5 +1,5 @@
 """gen <dir>: add a real image to the test tree.  check <srcroot>: exercise the running server_test."""
-import http.client, io, json, os, sys, time, urllib.parse, zipfile, zlib
+import hashlib, hmac, http.client, io, json, os, sys, time, urllib.parse, zipfile, zlib
 
 OUT = os.path.join("build", "server_test_out")
 INBOX = os.path.join(OUT, "inbox")
@@ -246,6 +246,46 @@ def check_integrity(c, S):
     expect("failed upload is gone", r.status == 404, r.status)
 
 
+def new_session(c, tok):
+    r, _ = req(c, "/" + tok + "/")
+    return r.getheader("Location")
+
+
+def check_devices(c, tok):
+    """A phone remembered with the code later unlocks by answering a challenge, never by sending its secret."""
+    S1 = new_session(c, tok)
+    r, b = req(c, f"{S1}auth?remember=1", "POST", {"Content-Type": "text/plain"}, CODE.encode())
+    j = js(b)
+    expect("remember enrols a phone", r.status == 200 and len(j.get("device", "")) >= 8 and len(j.get("secret", "")) >= 32, j)
+
+    S2 = new_session(c, tok)
+    r, b = req(c, f"{S2}api/manifest")
+    expect("new session starts locked", js(b).get("receiveOk") is False)
+    r, b = req(c, f"{S2}auth?device={j['device']}", "POST")
+    nonce = js(b).get("nonce")
+    expect("device auth returns a challenge", r.status == 200 and nonce, r.status)
+    r, _ = req(c, f"{S2}auth?device={j['device']}&proof={'0' * 64}", "POST")
+    expect("wrong proof refused", r.status == 401, r.status)
+    r, _ = req(c, f"{S2}auth?device={j['device']}&proof={hmac.new(j['secret'].encode(), nonce.encode(), hashlib.sha256).hexdigest()}", "POST")
+    expect("a used challenge cannot be replayed", r.status == 401, r.status)
+    r, b = req(c, f"{S2}auth?device={j['device']}", "POST")
+    nonce = js(b)["nonce"]
+    proof = hmac.new(j["secret"].encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    r, _ = req(c, f"{S2}auth?device={j['device']}&proof={proof}", "POST")
+    expect("right proof unlocks sending", r.status == 204, r.status)
+    r, b = req(c, f"{S2}api/manifest")
+    expect("session is authorized", js(b).get("receiveOk") is True)
+    r, _ = req(c, f"{S2}text", "POST", None, b"remembered note")
+    expect("remembered phone can send", r.status == 204, r.status)
+
+    S3 = new_session(c, tok)
+    r, _ = req(c, f"{S3}auth?device=unknowndev", "POST")
+    expect("unknown device refused", r.status == 401, r.status)
+    for _ in range(8):
+        r, _ = req(c, f"{S3}auth?device=unknowndev", "POST")
+    expect("repeated bad devices are locked out", r.status == 429, r.status)
+
+
 def check_expiry(c, S):
     t0 = token()
     flag("unshare", True)
@@ -297,6 +337,7 @@ def check(src):
         check_receive_auth(c, S)
         c = check_uploads(c, S)
         check_integrity(c, S)
+        check_devices(c, tok)
         check_expiry(c, S)
     finally:
         flag("done", True)

@@ -42,6 +42,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/out"
           python tests/verify.py gen "$RUNNER_TEMP/src"
           python tests/server_check.py gen "$RUNNER_TEMP/src"
+          build/tests-linux/crypto_test
+          build/tests-linux/persist_test
           build/tests-linux/core_test "$RUNNER_TEMP/out" "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv"
           python tests/verify.py check "$RUNNER_TEMP/out" "$RUNNER_TEMP/src"
 
@@ -92,6 +94,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/out"
           python tests/verify.py gen "$RUNNER_TEMP/src"
           python tests/server_check.py gen "$RUNNER_TEMP/src"
+          build/tests/crypto_test
+          build/tests/persist_test
           build/tests/core_test "$RUNNER_TEMP/out" "$RUNNER_TEMP/src/Photos Trip" "$RUNNER_TEMP/src/single.csv"
           python tests/verify.py check "$RUNNER_TEMP/out" "$RUNNER_TEMP/src"
 
@@ -162,6 +166,8 @@ jobs:
           New-Item -ItemType Directory -Force $src, $out | Out-Null
           python tests/verify.py gen $src
           python tests/server_check.py gen $src
+          build\tests\crypto_test.exe
+          build\tests\persist_test.exe
           build\tests\core_test.exe $out "$src\Photos Trip" "$src\single.csv"
           python tests/verify.py check $out $src
           if ($LASTEXITCODE) { exit 1 }

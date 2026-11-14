@@ -10,7 +10,7 @@ LIBS="$(pkg-config --libs gdk-pixbuf-2.0 libcurl) -pthread"
 for f in src/core/qr.cpp src/core/deflate.cpp src/core/bundle.cpp src/core/http.cpp src/core/tunnel.cpp src/linux/platform_linux.cpp; do
     $CXX $FLAGS -c "$f" -o "$OUT/obj/$(basename "$f" .cpp).o"
 done
-for t in core_test server_test tunnel_test; do
+for t in core_test server_test tunnel_test crypto_test persist_test; do
     $CXX $FLAGS "tests/$t.cpp" "$OUT"/obj/*.o $LIBS -o "$OUT/$t"
 done
 echo "Tests built in $OUT"

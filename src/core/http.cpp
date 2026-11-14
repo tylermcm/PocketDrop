@@ -1,5 +1,6 @@
 #include "http.h"
 #include "webpage.h"
+#include "crypto.h"
 #include "deflate.h"
 #include <algorithm>
 #include <cctype>
@@ -24,6 +25,8 @@ struct HttpServer::Session {
     int inflight = 0;      // requests in progress
     bool receiveAuthorized = false;
     int authFailures = 0;
+    std::string nonce; // one outstanding remembered-phone challenge
+    uint64_t nonceAt = 0;
 };
 
 struct HttpServer::Upload {
@@ -505,6 +508,79 @@ void HttpServer::publish(std::shared_ptr<Bundle> bundle) {
     std::lock_guard<std::mutex> l(mu_);
     bundle_ = std::move(bundle);
     rev_++;
+}
+
+constexpr size_t MAX_TRUSTED = 32;
+
+void HttpServer::setTrustedDevices(std::vector<TrustedDevice> devices) {
+    int64_t now = plat::unix_time();
+    std::erase_if(devices, [&](const TrustedDevice& d) {
+        return d.id.empty() || d.secret.size() < 32 || now - d.lastUsed > DEVICE_TTL_S;
+    });
+    if (devices.size() > MAX_TRUSTED) devices.erase(devices.begin(), devices.end() - (long)MAX_TRUSTED);
+    std::lock_guard<std::mutex> l(mu_);
+    trusted_ = std::move(devices);
+}
+
+std::vector<TrustedDevice> HttpServer::trustedDevices() const {
+    std::lock_guard<std::mutex> l(mu_);
+    return trusted_;
+}
+
+void HttpServer::forgetDevices() {
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        trusted_.clear();
+    }
+    if (onEvent) onEvent(Event::DevicesChanged);
+}
+
+// A remembered phone answers a fresh challenge instead of typing the code. The first call
+// (no proof) returns the challenge; the second proves HMAC-SHA-256(secret, challenge). Wrong or
+// unknown answers count against the same attempt limit as wrong codes.
+bool HttpServer::handleDeviceAuth(plat::Sock s, Session& session, const std::string& id, const std::string& proof,
+                                  bool keep) {
+    int status = 401;
+    std::string reply = "{\"error\":\"device\"}";
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        uint64_t now = plat::tick_ms();
+        int64_t unix = plat::unix_time();
+        auto it = std::find_if(trusted_.begin(), trusted_.end(), [&](const TrustedDevice& d) { return d.id == id; });
+        bool known = it != trusted_.end() && unix - it->lastUsed <= DEVICE_TTL_S;
+        if (receiveCode_.empty()) {
+            status = 403;
+        } else if (session.authFailures >= 8) {
+            status = 429;
+            reply = "{\"error\":\"locked\"}";
+        } else if (!known) {
+            if (it != trusted_.end()) { trusted_.erase(it); changed = true; }
+            if (++session.authFailures >= 8) { status = 429; reply = "{\"error\":\"locked\"}"; }
+        } else if (proof.empty()) {
+            session.nonce = util::random_token(16);
+            session.nonceAt = now;
+            status = 200;
+            reply = "{\"nonce\":\"" + session.nonce + "\"}";
+        } else {
+            std::string nonce = std::move(session.nonce);
+            session.nonce.clear();
+            bool fresh = !nonce.empty() && now - session.nonceAt <= 60 * 1000;
+            std::string want = crypto::to_hex(crypto::hmac_sha256(it->secret, nonce));
+            if (fresh && crypto::equal_constant_time(want, util::lower(proof))) {
+                session.receiveAuthorized = true;
+                session.authFailures = 0;
+                it->lastUsed = unix;
+                changed = true;
+                status = 204;
+            } else if (++session.authFailures >= 8) {
+                status = 429;
+                reply = "{\"error\":\"locked\"}";
+            }
+        }
+    }
+    if (changed && onEvent) onEvent(Event::DevicesChanged);
+    return status == 204 ? simple(s, 204, false, keep) : json(s, status, reply, keep);
 }
 
 void HttpServer::setReceiveCode(const std::string& code) {
@@ -1005,10 +1081,14 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
         if (bodyLen > 32) return json(s, 413, "{\"error\":\"code\"}", false);
         std::string code;
         if (!readBody(s, buf, bodyLen, [&](const char* p, size_t n) { code.append(p, n); })) return false;
+        std::string deviceId = queryParam(r.query, "device"), proof = queryParam(r.query, "proof");
+        if (!deviceId.empty()) return handleDeviceAuth(s, session, deviceId, proof, keep);
         code.erase(std::remove_if(code.begin(), code.end(), [](unsigned char c) { return c == '-' || std::isspace(c); }),
                    code.end());
         std::transform(code.begin(), code.end(), code.begin(), [](unsigned char c) { return (char)std::toupper(c); });
         int status = 401;
+        std::string enrolled;
+        bool remember = queryParam(r.query, "remember") == "1";
         {
             std::lock_guard<std::mutex> l(mu_);
             if (receiveCode_.empty()) {
@@ -1020,10 +1100,23 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
                 session.receiveAuthorized = true;
                 session.authFailures = 0;
                 status = 204;
+                if (remember) {
+                    TrustedDevice d;
+                    d.id = util::random_token(8);
+                    d.secret = util::random_token(24);
+                    d.name = device.empty() ? session.device : device;
+                    d.created = d.lastUsed = plat::unix_time();
+                    enrolled = "{\"device\":\"" + d.id + "\",\"secret\":\"" + d.secret + "\"}";
+                    if (trusted_.size() >= MAX_TRUSTED) trusted_.erase(trusted_.begin());
+                    trusted_.push_back(std::move(d));
+                    status = 200;
+                }
             } else if (++session.authFailures >= 8) {
                 status = 429;
             }
         }
+        if (status == 200 && onEvent) onEvent(Event::DevicesChanged);
+        if (status == 200) return json(s, 200, enrolled, keep);
         return status == 204 ? simple(s, 204, false, keep)
                              : json(s, status, status == 429 ? "{\"error\":\"locked\"}" : "{\"error\":\"code\"}", keep);
     }
