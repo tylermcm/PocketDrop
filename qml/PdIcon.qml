@@ -11,7 +11,7 @@ Item {
     implicitWidth: size; implicitHeight: size; width: size; height: size
     Shape {
         width: 24; height: 24; scale: icon.size / 24; transformOrigin: Item.TopLeft
-        preferredRendererType: Shape.CurveRenderer
+        antialiasing: true
         ShapePath {
             strokeColor: icon.color; strokeWidth: icon.strokeWidth; fillColor: "transparent"
             capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin

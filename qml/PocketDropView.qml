@@ -80,7 +80,7 @@ Item {
             readonly property int n: Math.max(1, page.d.qrSize || 1)
             x: (parent.width - edge) / 2; y: (parent.height - edge) / 2; width: n; height: n
             scale: edge / n; transformOrigin: Item.TopLeft
-            antialiasing: false; preferredRendererType: Shape.GeometryRenderer
+            antialiasing: false
             ShapePath { strokeColor: "transparent"; fillColor: "#111116"; PathSvg { path: page.card === "qr" && !page.pcActive ? (page.d.qrPath || "") : "" } }
             Accessible.role: Accessible.Graphic; Accessible.name: "QR code for " + (page.d.linkText || "the share link")
         }
@@ -150,9 +150,9 @@ Item {
                 color: msg.c === "failed" ? Qt.alpha(theme.rej, 0.14) : msg.c === "drag" ? Qt.alpha(theme.accent, 0.16) : theme.s2
                 PdIcon { anchors.centerIn: parent; size: 26; strokeWidth: 1.7
                     color: msg.c === "failed" ? theme.rej : msg.c === "drag" ? theme.accentFg : msg.c === "nonet" ? theme.fg3 : page.cyan
-                    path: msg.c === "drag" ? "M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14" : msg.c === "missing" ? "M12 21a9 9 0 100-18 9 9 0 000 18zM3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"
-                        : msg.c === "failed" ? "M6 6l12 12M18 6L6 18" : msg.c === "bluetooth" ? "M8 3h8a1 1 0 011 1v16a1 1 0 01-1 1H8a1 1 0 01-1-1V4a1 1 0 011-1zM11 18h2"
-                        : msg.c === "pc" ? "M4 5h16v10H4zM9 19h6M12 15v4" : "M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01" }
+                    path: msg.c === "drag" ? "M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14" : msg.c === "missing" ? "M12 21a9 9 0 1 0 0 -18 9 9 0 000 18zM3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"
+                        : msg.c === "failed" ? "M6 6l12 12M18 6L6 18" : msg.c === "bluetooth" ? "M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1H8a1 1 0 0 1 -1 -1V4a1 1 0 0 1 1 -1zM11 18h2"
+                        : msg.c === "pc" ? "M4 5h16v10H4zM9 19h6M12 15v4" : "M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01" }
             }
             BusyIndicator { visible: msg.c === "busy"; running: visible; anchors.horizontalCenter: parent.horizontalCenter; width: 40; height: 40
                 palette.dark: theme.accent }
@@ -202,7 +202,7 @@ Item {
         Row {
             id: actions
             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; spacing: 6
-            PdChip { visible: !!page.d.hasLink && page.mode === 1; label: "Share"; iconPath: "M12 15V4M8 8l4-4 4 4M5 14v4a2 2 0 002 2h10a2 2 0 002-2v-4"; onClicked: pocketDrop.command("share") }
+            PdChip { visible: !!page.d.hasLink && page.mode === 1; label: "Share"; iconPath: "M12 15V4M8 8l4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-4"; onClicked: pocketDrop.command("share") }
             PdChip { objectName: "copyChip"; visible: !!page.d.hasLink; done: !!page.d.copied; label: page.d.copied ? "Copied" : (page.mode === 1 ? "Copy QR" : "Copy link")
                 iconPath: "M9 9h10v11H9zM5 15V4h10"; onClicked: pocketDrop.command("copy") }
         }
@@ -215,7 +215,7 @@ Item {
         visible: !page.pcActive
         readonly property bool offlineNow: page.mode === 2
         PdIcon { x: 2; anchors.verticalCenter: parent.verticalCenter; size: 16; strokeWidth: 1.9; color: theme.fg3
-            path: "M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01" }
+            path: "M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01" }
         Text { x: 28; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 28 - (connRow.offlineNow ? backChip.width : sw.width) - 12; elide: Text.ElideRight; color: theme.fg2; font.pixelSize: 13
             text: connRow.offlineNow ? "No router needed: your phone joins this hotspot" : "Reach my phone beyond this Wi-Fi" }
         PdSwitch {
@@ -329,8 +329,8 @@ Item {
                     color: row.received ? Qt.alpha(theme.win, 0.14) : modelData.kind === "note" ? Qt.alpha(theme.accent, 0.14) : theme.s3 }
                 PdIcon { visible: !row.isColl; anchors.centerIn: parent; size: 16; strokeWidth: 1.8
                     color: row.received ? theme.win : modelData.kind === "note" ? theme.accentFg : theme.fg2
-                    path: modelData.kind === "folder" ? "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"
-                        : (modelData.kind === "note" || modelData.kind === "rnote") ? "M5 6h14M5 11h14M5 16h9" : "M7 3h7l5 5v12a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1zM14 3v5h5" }
+                    path: modelData.kind === "folder" ? "M3 7a2 2 0 0 1 2 -2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2z"
+                        : (modelData.kind === "note" || modelData.kind === "rnote") ? "M5 6h14M5 11h14M5 16h9" : "M7 3h7l5 5v12a1 1 0 0 1 -1 1H7a1 1 0 0 1 -1 -1V4a1 1 0 0 1 1 -1zM14 3v5h5" }
                 Repeater {
                     model: row.isColl ? 3 : 0
                     delegate: Rectangle { required property int index; x: index * 16; width: 30; height: 30; radius: 8; color: theme.s3; border.color: theme.s1; border.width: 2

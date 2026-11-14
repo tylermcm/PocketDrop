@@ -63,6 +63,19 @@ jobs:
         timeout-minutes: 5
         run: build/tests-linux/tunnel_test 90 --download
 
+      - name: Qt for the standalone app
+        continue-on-error: true   # not yet run on GitHub's runners; remove this once it has
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.5.*
+          cache: true
+
+      - name: Standalone app smoke test
+        continue-on-error: true
+        run: |
+          pip install pillow
+          bash tests/app_smoke.sh
+
       - name: QML view tests
         run: |
           pip install pyside6 pytest
