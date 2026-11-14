@@ -8,13 +8,18 @@ import QtQuick.Shapes
 Item {
     id: page
     property bool showTitle: true                 // the standalone window shows the name; Image Triage has its own header
+    property bool autoStart: true                 // start the engine as soon as the view exists
+    property bool externalDrag: false             // the host is dragging something toward the view
+    property Component thumb: Component {         // how a collection's thumbnails are drawn; a host can supply its own cache
+        Image { property string path; fillMode: Image.PreserveAspectCrop; asynchronous: true; source: path }
+    }
     property bool handleRisk: true                // ask before Anywhere (hosts that ask themselves set this false)
     property alias extraButtons: extraRow.data    // hosts add buttons beside Add (Image Triage: Library)
     property alias menuExtras: menu.extras        // and entries in the menu's settings group
     readonly property var d: pocketDrop.st
     readonly property var pc: d.pc || ({})
     readonly property bool pcActive: (pc.mode || 0) !== 0
-    readonly property string card: dropArea.containsDrag ? "drag" : (d.card || "busy")
+    readonly property string card: dropArea.containsDrag || externalDrag ? "drag" : (d.card || "busy")
     readonly property string mono: Qt.platform.os === "windows" ? "Consolas" : "monospace"
     readonly property color cyan: "#43cae7"
     readonly property real gutter: 16
@@ -24,7 +29,7 @@ Item {
     property alias menuPopup: menu
     property bool showUrl: false
     property bool showCode: false
-    Component.onCompleted: pocketDrop.start()
+    Component.onCompleted: { if (autoStart) pocketDrop.start() }
 
     function chooseFiles() { filesDialog.open() }
     function chooseFolder() { folderDialog.open() }
@@ -334,8 +339,8 @@ Item {
                 Repeater {
                     model: row.isColl ? 3 : 0
                     delegate: Rectangle { required property int index; x: index * 16; width: 30; height: 30; radius: 8; color: theme.s3; border.color: theme.s1; border.width: 2
-                        Image { anchors.fill: parent; anchors.margins: 2; fillMode: Image.PreserveAspectCrop; asynchronous: true
-                            source: row.modelData.thumbs && row.modelData.thumbs[index] ? row.modelData.thumbs[index] : "" } }
+                        Loader { anchors.fill: parent; anchors.margins: 2; sourceComponent: page.thumb
+                            onLoaded: item.path = Qt.binding(function() { return row.modelData.thumbs && row.modelData.thumbs[index] ? row.modelData.thumbs[index] : "" }) } }
                 }
             }
             Column {
