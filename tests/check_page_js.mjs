@@ -45,3 +45,11 @@ for (const [key, msg] of [["k", "m"], ["a".repeat(48), "nonce0123456789abcdef"],
   if (hmacHex(key, msg) !== createHmac("sha256", key).update(msg).digest("hex")) throw new Error("page HMAC differs");
 }
 console.log("Phone page SHA-256/HMAC: OK");
+
+// The code in a scanned link's fragment unlocks sending; anything else in the fragment is ignored.
+const { hashCode } = new Function(`${grab("hashCode")}\nreturn {hashCode}`)();
+for (const [input, want] of [["#c=ZRQ5-DMYC", "ZRQ5DMYC"], ["#c=zrq5dmyc", "ZRQ5DMYC"], ["", ""], ["#c=SHORT", ""], ["#c=ZRQ5-DMYC&x=1", ""],
+  ["#other=ZRQ5-DMYC", ""], ["#c=ZRQ5 DMYC", ""], ["#c=ZRQ5-DMYC1", ""]]) {
+  if (hashCode(input) !== want) throw new Error(`hashCode(${JSON.stringify(input)}) = ${JSON.stringify(hashCode(input))}, wanted ${JSON.stringify(want)}`);
+}
+console.log("Phone page link unlock: OK");
