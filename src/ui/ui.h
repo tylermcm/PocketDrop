@@ -123,6 +123,7 @@ private:
     void setMode(int m);
     void newLink();
     void rotateReceiveCode();
+    void refreshBinding(bool force = false);
     std::string shareUrl() const;
     void refreshQr();
     void showMenu();
@@ -168,6 +169,7 @@ private:
     int mode_ = 0; // 0 = same Wi-Fi, 1 = anywhere, 2 = offline hotspot
     std::string qrText_;
     std::string receiveCode_;
+    std::string listenAddress_; // the one address the server listens on
     qr::Code qr_;
 
     bool topmost_ = false, burnAfter_ = false, autoAnywhere_ = false;

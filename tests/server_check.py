@@ -5,6 +5,7 @@ OUT = os.path.join("build", "server_test_out")
 INBOX = os.path.join(OUT, "inbox")
 UA = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)"}
 PORT = int(os.environ.get("PD_TEST_PORT", "47291"))
+CODE = os.environ.get("PD_TEST_RECEIVE_CODE") or "TESTCODE"
 fails = 0
 
 
@@ -100,6 +101,23 @@ def check_downloads(c, S, src):
             expect("thumbnail jpeg", good, f"{len(body)} bytes")
     r, body = req(c, f"{S}t/{by_path['single.csv']['i']}")
     expect("no thumb for csv", r.status == 404)
+
+
+def check_receive_auth(c, S):
+    """Phones may not send anything until the displayed code is entered, in every sharing mode."""
+    r, b = req(c, f"{S}api/manifest")
+    m = js(b)
+    expect("manifest asks for the receive code", m.get("receiveAuth") is True and m.get("receiveOk") is False, m)
+    r, _ = req(c, f"{S}up?name=x.bin&size=3", "POST")
+    expect("upload refused before the code", r.status == 401, r.status)
+    r, _ = req(c, f"{S}text", "POST", None, b"hi")
+    expect("note refused before the code", r.status == 401, r.status)
+    r, _ = req(c, f"{S}auth", "POST", {"Content-Type": "text/plain"}, b"WRONGCODE")
+    expect("wrong code refused", r.status == 401, r.status)
+    r, _ = req(c, f"{S}auth", "POST", {"Content-Type": "text/plain"}, CODE.encode())
+    expect("right code accepted", r.status == 204, r.status)
+    r, b = req(c, f"{S}api/manifest")
+    expect("manifest reports the session as authorized", js(b).get("receiveOk") is True)
 
 
 def check_uploads(c, S):
@@ -238,6 +256,7 @@ def check(src):
         expect("unknown session 404", r.status == 404)
 
         check_downloads(c, S, src)
+        check_receive_auth(c, S)
         c = check_uploads(c, S)
         check_expiry(c, S)
     finally:

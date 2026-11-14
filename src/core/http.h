@@ -46,7 +46,8 @@ public:
     std::function<void(Event)> onEvent; // invoked on worker threads
 
     ~HttpServer() { stop(); }
-    bool start(int preferredPort, bool loopbackOnly = false);
+    // bindAddress empty listens on loopback only; a LAN address must be chosen explicitly.
+    bool start(int preferredPort, bool loopbackOnly = false, const std::string& bindAddress = {});
     void stop();
     int port() const { return port_; }
 
@@ -63,7 +64,7 @@ public:
     bool phoneConnected() const;
 
     void setInbox(const std::string& dir); // where received files are saved
-    void setReceiveCode(const std::string& code); // empty disables phone -> computer authorization
+    void setReceiveCode(const std::string& code); // empty disables phone -> computer transfers
     std::string startPcShare(std::shared_ptr<Bundle> bundle);
     void stopPcShare();
     bool pcShareComplete() const;

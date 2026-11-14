@@ -24,7 +24,9 @@ int main(int argc, char** argv) {
     fast.activeWindowMs = 1500;
     srv.setPolicy(fast);
     srv.setInbox(inbox);
-    if (const char* code = getenv("PD_TEST_RECEIVE_CODE")) srv.setReceiveCode(code);
+    // Receiving always needs a code; the checkers read this one.
+    const char* codeEnv = getenv("PD_TEST_RECEIVE_CODE");
+    srv.setReceiveCode(codeEnv && *codeEnv ? codeEnv : "TESTCODE");
     const char* portEnv = getenv("PD_TEST_PORT");
     int port = portEnv && *portEnv ? atoi(portEnv) : 47291;
     if (!srv.start(port, getenv("PD_TEST_LAN") == nullptr) || srv.port() != port) {

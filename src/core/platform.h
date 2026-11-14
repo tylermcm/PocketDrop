@@ -15,7 +15,8 @@ namespace plat {
 using Sock = intptr_t;
 constexpr Sock BAD_SOCK = -1;
 bool net_init();
-Sock tcp_listen(int port, bool loopbackOnly, int* boundPort);
+// An empty address binds loopback; callers must explicitly select a LAN address.
+Sock tcp_listen(int port, bool loopbackOnly, int* boundPort, const std::string& bindAddress = {});
 Sock tcp_accept(Sock s, int timeoutMs); // BAD_SOCK on timeout or error
 void tcp_configure(Sock s, int recvTimeoutMs); // no Nagle, receive timeout, no SIGPIPE
 int tcp_recv(Sock s, char* buf, int len);      // <= 0: closed or error
@@ -124,6 +125,18 @@ int process_finish(Process* p, int timeoutMs);    // waits, frees p, returns the
 std::string cloudflared_download_url();
 std::vector<std::string> cloudflared_candidates(); // existing install locations, in priority order
 std::string cloudflared_install_path();
+// Windows pins the complete executable and holds a read lock through process creation.
+#ifdef _WIN32
+Process* cloudflared_start(const std::string& exe, const std::vector<std::string>& args,
+                          const std::vector<std::pair<std::string, std::string>>& envOverrides,
+                          const std::string& cwd, std::string& err);
+#else
+inline Process* cloudflared_start(const std::string& exe, const std::vector<std::string>& args,
+                                 const std::vector<std::pair<std::string, std::string>>& envOverrides,
+                                 const std::string& cwd, std::string& err) {
+    return process_start(exe, args, envOverrides, cwd, err);
+}
+#endif
 // Verifies a downloaded release asset and installs it at cloudflared_install_path().
 bool cloudflared_install(const std::string& downloadedFile, std::string& err);
 
