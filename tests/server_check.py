@@ -1,5 +1,5 @@
 """gen <dir>: add a real image to the test tree.  check <srcroot>: exercise the running server_test."""
-import http.client, io, json, os, sys, time, urllib.parse, zipfile
+import http.client, io, json, os, sys, time, urllib.parse, zipfile, zlib
 
 OUT = os.path.join("build", "server_test_out")
 INBOX = os.path.join(OUT, "inbox")
@@ -208,6 +208,44 @@ def check_uploads(c, S):
     return c
 
 
+def check_integrity(c, S):
+    """Chunks and whole files carry a CRC-32; damage is refused and nothing damaged is kept."""
+    def start(name, size):
+        r, b = req(c, f"{S}up?name={urllib.parse.quote(name)}&size={size}", "POST")
+        return js(b)["id"]
+
+    def put(uid, offset, data, **crc):
+        q = "".join(f"&{k}={v}" for k, v in crc.items())
+        r, b = req(c, f"{S}up/{uid}?offset={offset}{q}", "PUT", {"Content-Type": "application/octet-stream"}, data)
+        return r.status, js(b)
+
+    def hx(n):
+        return f"{n & 0xFFFFFFFF:08x}"
+
+    a, b = os.urandom(70_000), os.urandom(50_000)
+    whole = a + b
+    uid = start("crc-ok.bin", len(whole))
+    st, j = put(uid, 0, a, crc=hx(zlib.crc32(a)))
+    expect("good chunk crc accepted", st == 200 and j.get("received") == len(a), j)
+    bad = bytearray(b)
+    bad[10] ^= 0xFF
+    st, j = put(uid, len(a), bytes(bad), crc=hx(zlib.crc32(b)))
+    expect("damaged chunk refused", st == 422 and j.get("error") == "checksum" and j.get("received") == len(a), (st, j))
+    st, j = put(uid, len(a), b, crc=hx(zlib.crc32(b)), fcrc=hx(zlib.crc32(whole)))
+    expect("resent chunk completes the file", st == 200 and j.get("done"), (st, j))
+    p = os.path.join(INBOX, "crc-ok.bin")
+    expect("verified file saved intact", os.path.exists(p) and open(p, "rb").read() == whole)
+
+    uid = start("crc-bad.bin", len(whole))
+    put(uid, 0, a, crc=hx(zlib.crc32(a)))
+    st, j = put(uid, len(a), b, crc=hx(zlib.crc32(b)), fcrc=hx(zlib.crc32(whole) ^ 1))
+    expect("wrong whole-file crc refused", st == 422 and j.get("error") == "file_checksum", (st, j))
+    expect("nothing damaged is kept", not os.path.exists(os.path.join(INBOX, "crc-bad.bin"))
+           and not [n for n in os.listdir(INBOX) if n.startswith("crc-bad")])
+    r, _ = req(c, f"{S}up/{uid}")
+    expect("failed upload is gone", r.status == 404, r.status)
+
+
 def check_expiry(c, S):
     t0 = token()
     flag("unshare", True)
@@ -258,6 +296,7 @@ def check(src):
         check_downloads(c, S, src)
         check_receive_auth(c, S)
         c = check_uploads(c, S)
+        check_integrity(c, S)
         check_expiry(c, S)
     finally:
         flag("done", True)

@@ -333,20 +333,45 @@ function fail(status){
   return new Error("Couldn't save on your computer");
 }
 
+const crcTab=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+async function crcOf(blob){
+  const b=new Uint8Array(await blob.arrayBuffer());let c=0xffffffff;
+  for(let i=0;i<b.length;i++)c=crcTab[(c^b[i])&255]^(c>>>8);
+  return (c^0xffffffff)>>>0;
+}
+function gf2(mat,vec){let sum=0,i=0;while(vec){if(vec&1)sum^=mat[i];vec>>>=1;i++}return sum>>>0}
+function gf2sq(sq,mat){for(let n=0;n<32;n++)sq[n]=gf2(mat,mat[n])}
+function crcJoin(a,b,len){
+  if(len<=0)return a;
+  const odd=new Array(32),even=new Array(32);odd[0]=0xedb88320;let row=1;
+  for(let n=1;n<32;n++){odd[n]=row;row<<=1}
+  gf2sq(even,odd);gf2sq(odd,even);
+  do{
+    gf2sq(even,odd);if(len&1)a=gf2(even,a);len=Math.floor(len/2);if(!len)break;
+    gf2sq(odd,even);if(len&1)a=gf2(odd,a);len=Math.floor(len/2);
+  }while(len);
+  return (a^b)>>>0;
+}
+const hex8=n=>n.toString(16).padStart(8,"0");
+
 async function upload(it){
   if(data&&data.receiveAuth&&!data.receiveOk)throw fail(401);
   if(!it.id){
     const r=await fetch(`up?name=${enc(it.name)}&size=${it.size}`,{method:"POST"});
     if(!r.ok)throw fail(r.status);
     const j=await r.json();
-    it.id=j.id;it.sent=j.received||0;
+    it.id=j.id;it.sent=j.received||0;it.acc=0;it.accAt=0;it.bad=0;
     if(j.done){it.state="done";it.saved=j.name;return}
   }
   const chunk=(data&&data.chunk)||8388608;
   while(it.sent<it.size){
     if(it.state==="cancel")return;
     let res;
-    try{res=await put(it,it.f.slice(it.sent,Math.min(it.size,it.sent+chunk)))}
+    const slice=it.f.slice(it.sent,Math.min(it.size,it.sent+chunk)),base=it.sent,crc=await crcOf(slice);
+    if(it.state==="cancel")return;
+    // The whole-file CRC is only known while chunks go out in order from the start.
+    const whole=it.accAt===base?crcJoin(it.acc,crc,slice.size):null;
+    try{res=await put(it,slice,crc,base+slice.size>=it.size&&whole!==null?whole:null)}
     catch(e){
       if(it.state==="cancel")return;
       if(++it.tries>8)throw new Error("Connection lost. Tap retry.");
@@ -361,17 +386,24 @@ async function upload(it){
     }
     it.tries=0;
     if(res.status===409){it.sent=res.body.received;continue}
+    if(res.status===422){
+      if(res.body.error==="file_checksum"){it.id=null;it.sent=0;throw new Error("The file was damaged on the way. Tap retry.")}
+      if(++it.bad>8)throw new Error("Chunks keep arriving damaged. Check your connection and tap retry.");
+      it.sent=res.body.received;continue;
+    }
+    it.bad=0;
     if(res.status!==200){if(res.status===404){it.id=null;it.sent=0}throw fail(res.status)}
     it.sent=res.body.received;
+    if(it.accAt===base&&it.sent===base+slice.size){it.acc=whole;it.accAt=it.sent}else it.accAt=-1;
     if(res.body.done){it.state="done";it.saved=res.body.name;return}
   }
 }
 
-function put(it,blob){
+function put(it,blob,crc,fcrc){
   return new Promise((ok,no)=>{
     const x=new XMLHttpRequest(),base=it.sent;
     it.xhr=x;
-    x.open("PUT",`up/${it.id}?offset=${base}`);
+    x.open("PUT",`up/${it.id}?offset=${base}&crc=${hex8(crc)}${fcrc===null?"":"&fcrc="+hex8(fcrc)}`);
     x.upload.onprogress=e=>{
       it.live=base+e.loaded;
       const now=performance.now();

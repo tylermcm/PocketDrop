@@ -267,6 +267,37 @@ std::string queryParam(const std::string& q, const char* key) {
     return {};
 }
 
+// Exactly eight hex digits, as the phone page writes a CRC-32.
+bool parseHexCrc(const std::string& text, uint32_t& out) {
+    if (text.size() != 8) return false;
+    uint32_t v = 0;
+    for (char c : text) {
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return false;
+        v = v << 4 | (uint32_t)d;
+    }
+    out = v;
+    return true;
+}
+
+// CRC-32 of a whole saved file; false when it cannot be read.
+bool fileCrc(const std::string& path, uint32_t& out) {
+    plat::File f = plat::file_open_read(path);
+    if (f == plat::BAD_FILE) return false;
+    std::vector<uint8_t> block(1 << 20);
+    uint32_t crc = 0;
+    bool ok = true;
+    for (;;) {
+        int64_t n = plat::file_read(f, block.data(), block.size());
+        if (n < 0) { ok = false; break; }
+        if (n == 0) break;
+        crc = crc32_update(crc, block.data(), (size_t)n);
+    }
+    plat::file_close(f);
+    out = crc;
+    return ok;
+}
+
 bool isDigits(const std::string& s) {
     return !s.empty() && s.size() <= 19 && s.find_first_not_of("0123456789") == std::string::npos;
 }
@@ -1082,6 +1113,11 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
             if (!drain(s, buf, bodyLen)) return false;
             return json(s, code, reply, keep);
         }
+        // The page sends a CRC-32 of each chunk (and of the whole file with the last one) so a
+        // chunk damaged in transit is sent again instead of being saved.
+        uint32_t wantChunkCrc = 0, wantFileCrc = 0, gotChunkCrc = 0;
+        bool hasChunkCrc = parseHexCrc(queryParam(r.query, "crc"), wantChunkCrc);
+        bool hasFileCrc = parseHexCrc(queryParam(r.query, "fcrc"), wantFileCrc);
         bool writeErr = debugDiskFull_ || !plat::file_seek(u->file, offset);
         uint64_t pos = offset;
         bool alive = readBody(s, buf, bodyLen, [&](const char* p, size_t n) {
@@ -1090,6 +1126,7 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
                 writeErr = true;
                 return;
             }
+            if (hasChunkCrc) gotChunkCrc = crc32_update(gotChunkCrc, (const uint8_t*)p, n);
             pos += n;
             if (pos > u->transfer->sent) u->transfer->sent = pos;
             u->lastSeen = plat::tick_ms();
@@ -1101,7 +1138,14 @@ bool HttpServer::handleSession(plat::Sock s, const Req& r, std::string& buf, boo
             abortUpload(u);
             return json(s, full ? 507 : 500, full ? "{\"error\":\"disk\"}" : "{\"error\":\"save\"}", keep);
         }
+        if (hasChunkCrc && gotChunkCrc != wantChunkCrc)
+            return json(s, 422, "{\"error\":\"checksum\",\"received\":" + std::to_string(u->received) + "}", keep);
         u->received = std::max(u->received, offset + bodyLen);
+        uint32_t savedCrc = 0;
+        if (u->received >= u->size && hasFileCrc && (!fileCrc(u->partPath, savedCrc) || savedCrc != wantFileCrc)) {
+            abortUpload(u); // nothing damaged is kept; the phone starts this file again
+            return json(s, 422, "{\"error\":\"file_checksum\"}", keep);
+        }
         if (u->received < u->size) return json(s, 200, "{\"received\":" + std::to_string(u->received) + "}", keep);
         std::string saved = finishUpload(u);
         if (saved.empty()) return json(s, 500, "{\"error\":\"save\"}", keep);
