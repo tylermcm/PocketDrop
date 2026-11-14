@@ -37,6 +37,20 @@ Native C++20 desktop apps for Windows, macOS, and Linux, with no phone app or ac
 - **Offline**: create a temporary Wi-Fi hotspot. On Windows this can also use Bluetooth tethering when no Wi-Fi adapter is available. On Linux it uses NetworkManager (`nmcli`) and a Wi-Fi adapter, and is hidden when either is missing; starting it disconnects that adapter from its current Wi-Fi network. macOS has no scriptable hotspot, so Offline is not offered there. Availability depends on the adapter and driver.
 - **Windows installation and updates**: choose the portable `PocketDrop.exe` or `PocketDrop-Setup.exe`. The installer supports upgrades in place. Use **â‹¯ â†’ Check for updates** to download a newer published release, verify its SHA-256 digest, and launch its installer.
 
+## One screen, one app
+
+The screen is written once, in QML (`qml/PocketDropView.qml`), and draws what the engine reports (`Ui::stateJson`), answering every click with a named command (`qml/CONTRACT.md`). Two hosts use it:
+
+- the standalone app in `app/`, a small Qt Quick program that runs the engine and shows the screen (all three platforms, built with CMake and Qt 6.4 or newer);
+- Image Triage, which vendors the engine and the screen from this repository (`scripts/sync_pocketdrop.py`) and adds its Library button and a save-into-the-open-folder option.
+
+```sh
+cmake -S app -B build/app -DCMAKE_BUILD_TYPE=Release && cmake --build build/app
+build/app/PocketDrop [files or folders to share]
+```
+
+`tools/preview_qml.py` renders the screen in scripted states without the engine (PySide6), `tests/test_qml_view.py` checks that every state loads and the main controls send the right commands, and `tests/app_smoke.sh` builds the app and checks that it starts and draws against the real engine. The older native windows in `src/win`, `src/mac` and `src/linux` still build with `build.bat`, `build_mac.sh` and `build_linux.sh` until the Qt app has been validated on each platform.
+
 ## Build
 
 ### Windows
