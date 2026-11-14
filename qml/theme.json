@@ -1,0 +1,12 @@
+{
+  "dark": {
+    "base": "#0f0f13", "s1": "#17171d", "s2": "#1d1d25", "s3": "#272732", "line": "#363642", "lineSoft": "#2a2a34",
+    "fg": "#f3f3f6", "fg2": "#c9c9d3", "fg3": "#8b8b99", "accent": "#8b7cff", "accentFg": "#b9afff", "onAccent": "#ffffff",
+    "win": "#3ecf8e", "rev": "#e5a23d", "rej": "#e5484d", "lift": "#ffffff"
+  },
+  "light": {
+    "base": "#f4f4f8", "s1": "#ffffff", "s2": "#f0f0f5", "s3": "#e6e6ee", "line": "#d2d2dc", "lineSoft": "#e3e3ea",
+    "fg": "#16161c", "fg2": "#3a3a46", "fg3": "#6b6b78", "accent": "#6a58f0", "accentFg": "#5646d6", "onAccent": "#ffffff",
+    "win": "#1a9d63", "rev": "#b9770e", "rej": "#d13438", "lift": "#000000"
+  }
+}

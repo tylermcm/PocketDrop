@@ -63,6 +63,11 @@ jobs:
         timeout-minutes: 5
         run: build/tests-linux/tunnel_test 90 --download
 
+      - name: QML view tests
+        run: |
+          pip install pyside6 pytest
+          QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_qml_view.py
+
       - uses: actions/upload-artifact@v4
         with:
           name: PocketDrop-linux
