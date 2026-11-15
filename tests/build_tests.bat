@@ -10,7 +10,7 @@ set FLAGS=/nologo /std:c++20 /O2 /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /Fo:"%OUT
 set CORE=src\core\qr.cpp src\core\deflate.cpp src\core\bundle.cpp src\core\http.cpp src\core\tunnel.cpp src\core\pc_transfer.cpp src\core\nearby.cpp src\win\platform_win.cpp
 set LIBS=ws2_32.lib iphlpapi.lib winhttp.lib wintrust.lib crypt32.lib bcrypt.lib ole32.lib oleaut32.lib shell32.lib windowscodecs.lib gdi32.lib user32.lib advapi32.lib uuid.lib
 cl %FLAGS% /c %CORE% || exit /b 1
-for %%t in (core_test server_test tunnel_test crypto_test persist_test pc_secure_test pc_share_test hotspot_nm_test) do (
+for %%t in (core_test server_test tunnel_test crypto_test persist_test pc_secure_test pc_share_test hotspot_nm_test nearby_test) do (
     cl %FLAGS% /Fe:"%OUT%\%%t.exe" tests\%%t.cpp "%OUT%\obj\qr.obj" "%OUT%\obj\deflate.obj" "%OUT%\obj\bundle.obj" "%OUT%\obj\http.obj" "%OUT%\obj\tunnel.obj" "%OUT%\obj\platform_win.obj" %LIBS% || exit /b 1
 )
 cl %FLAGS% /Fe:"%OUT%\update_test.exe" tests\update_test.cpp src\win\update_win.cpp "%OUT%\obj\platform_win.obj" %LIBS% runtimeobject.lib || exit /b 1

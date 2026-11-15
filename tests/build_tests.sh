@@ -11,7 +11,7 @@ done
 clang++ $FLAGS -fobjc-arc -c src/mac/platform_mac.mm -o "$OUT/obj/platform_mac.o"
 LIBS="-framework Foundation -framework CoreGraphics -framework ImageIO -framework QuickLookThumbnailing
       -framework Security -framework SystemConfiguration -lcurl"
-for t in core_test server_test tunnel_test crypto_test persist_test pc_secure_test pc_share_test hotspot_nm_test pc_transfer_test; do
+for t in core_test server_test tunnel_test crypto_test persist_test pc_secure_test pc_share_test hotspot_nm_test pc_transfer_test nearby_test; do
     clang++ $FLAGS "tests/$t.cpp" "$OUT"/obj/*.o $LIBS -o "$OUT/$t"
 done
 echo "Tests built in $OUT"
