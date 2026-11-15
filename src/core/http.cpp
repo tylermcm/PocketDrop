@@ -1178,8 +1178,12 @@ bool HttpServer::handlePc(plat::Sock s, const Req& r, std::string& buf, bool via
         offer->streamed = ok;
         offer->crc = crc;
         offer->claimAt = plat::tick_ms();
+        // A stream that was cancelled or cut short ends its pairing too, so the receiver can try again at once with
+        // a fresh key exchange instead of being told another PC is receiving.
+        if (!ok) resetPairing(offer);
     }
     end(transfer, ok);
+    if (!ok && onEvent) onEvent(Event::PcPair);
     return false;
 }
 

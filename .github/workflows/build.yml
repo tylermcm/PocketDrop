@@ -58,6 +58,13 @@ jobs:
           python tests/server_check.py check "$RUNNER_TEMP/src"
           wait
 
+      - name: PC Share receiver tests
+        run: |
+          pip install cryptography
+          mkdir -p build
+          build/tests-linux/pc_transfer_test
+          PC_TRANSFER_TEST=build/tests-linux/pc_transfer_test python tests/nearby_check.py
+
       - name: Tunnel test
         continue-on-error: true
         timeout-minutes: 5
@@ -204,6 +211,7 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           build\tests\pc_transfer_test.exe
           if ($LASTEXITCODE) { exit 1 }
+          pip install cryptography
           python tests/nearby_check.py
           if ($LASTEXITCODE) { exit 1 }
           $p = Start-Process -PassThru -NoNewWindow build\tests\server_test.exe -ArgumentList 90, "`"$src\Photos Trip`"", "`"$src\single.csv`""

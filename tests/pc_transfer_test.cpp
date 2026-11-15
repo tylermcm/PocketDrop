@@ -1,5 +1,8 @@
 #include "../src/core/http.h"
+#include "../src/core/pc_secure.h"
 #include "../src/core/pc_transfer.h"
+#include <atomic>
+#include <thread>
 #include "../src/core/deflate.h"
 #include <cassert>
 #include <fstream>
@@ -26,6 +29,39 @@ std::shared_ptr<Bundle> prepared(const std::vector<std::string>& paths) {
     return bundle;
 }
 }
+
+// A receiver written by hand, to probe the sender the way a hostile PC on the LAN could: it pairs (the person at the
+// sender allows it) and then speaks the protocol directly.
+struct Raw {
+    pcsecure::Keys keys;
+    std::vector<std::string> headers;
+    bool pair(const std::string& base, const std::string& name = "Raw receiver") {
+        uint8_t sk[32], pk[32], peer[32];
+        pcsecure::make_keypair(sk, pk);
+        auto hello = plat::http_get(base + "hello", {"X-PocketDrop-Receiver: " + std::string(32, 'a'), "X-PocketDrop-Name: " + name,
+                                                      "X-PocketDrop-Key: " + crypto::to_hex(pk, 32), "Connection: close"},
+                                    plat::BAD_FILE, {}, 3000);
+        if (hello.status != 200 || hello.body.size() != 64) return false;
+        for (size_t i = 0; i < 32; i++) peer[i] = (uint8_t)std::stoi(hello.body.substr(2 * i, 2), nullptr, 16);
+        if (!pcsecure::derive(sk, peer, peer, pk, keys)) return false;
+        headers = {"X-PocketDrop-Receiver: " + keys.claim};
+        for (int i = 0; i < 500; i++) {
+            if (plat::http_get(base + "status", headers, plat::BAD_FILE, {}, 3000).body == "accepted") return true;
+            plat::sleep_ms(10);
+        }
+        return false;
+    }
+    // The data of `file`, opened frame by frame; empty when the stream is not intact.
+    std::string file(const std::string& base, int& status) {
+        pcsecure::Decoder decoder(keys);
+        std::string out;
+        auto result = plat::http_get(base + "file", headers, plat::BAD_FILE, {}, 3000, [&](const uint8_t* data, size_t n) {
+            return decoder.push(data, n, [&](const uint8_t* p, size_t m) { out.append((const char*)p, m); return true; });
+        });
+        status = result.status;
+        return decoder.complete() ? out : std::string();
+    }
+};
 
 int main(int argc, char** argv) {
     if (argc == 5) {
@@ -54,7 +90,15 @@ int main(int argc, char** argv) {
     write(single, content);
     write(util::path_join(inbox, "single.txt"), "keep existing");
     HttpServer server;
-    assert(server.start(47320));
+    assert(server.start(47320, false, addresses[0].ip));
+    // The person at the sender allows every pairing, as soon as one asks.
+    std::atomic<bool> stopAllowing{false};
+    std::thread allower([&] {
+        while (!stopAllowing) {
+            if (server.pcPairing().pending) server.pcAnswer(true);
+            plat::sleep_ms(2);
+        }
+    });
     const auto phoneToken = server.token();
     auto bundle = prepared({single});
     auto offer = server.startPcShare(bundle);
@@ -66,15 +110,26 @@ int main(int argc, char** argv) {
     auto get = [&](const std::string& route, const std::vector<std::string>& headers = std::vector<std::string>{}) {
         return plat::http_get(base + route, headers, plat::BAD_FILE, {}, 3000);
     };
-    assert(plat::http_get("http://127.0.0.1:" + std::to_string(peer.port) + "/pc/" + offer + "/info", {}, plat::BAD_FILE, {}, 3000).status == 404);
-    assert(get("file").status == 400);
-    assert(get("file", client).body == content);
-    assert(get("file", {"X-PocketDrop-Receiver: " + std::string(32, 'b')}).status == 409);
-    assert(get("verify?crc=123", client).status == 422);
-    assert(get("keepalive", client).status == 204 && server.pcAwaitingReceipt());
+    // The server listens on the LAN address only, so nothing answers on loopback (where the tunnel would come from).
+    assert(plat::http_get("http://127.0.0.1:" + std::to_string(peer.port) + "/pc/" + offer + "/info", {}, plat::BAD_FILE, {}, 3000).status == 0);
+    assert(get("file").status == 400);                              // no identity at all
+    assert(get("file", client).status == 404);                      // an identity nobody paired
+    assert(get("info", client).status == 404);
+    Raw raw;
+    assert(raw.pair(base));
+    {
+        Raw second;
+        assert(!second.pair(base));                                 // one receiver at a time
+    }
+    int status = 0;
+    assert(raw.file(base, status) == content && status == 200);     // the data arrives opened, never as plain bytes
+    assert(plat::http_get(base + "file", raw.headers, plat::BAD_FILE, {}, 3000).status == 409);  // and only once
+    assert(get("verify?crc=123", raw.headers).status == 422);
+    assert(get("keepalive", raw.headers).status == 204 && server.pcAwaitingReceipt());
     assert(!server.pcShareComplete());
-    assert(get("cancel", client).status == 204);
+    assert(get("cancel", raw.headers).status == 204);
     assert(!server.pcAwaitingReceipt());
+    assert(get("file", raw.headers).status == 404);                 // cancelling ended that pairing
     PcReceiver receiver;
     receiver.start(peer, inbox);
     assert(waitFor([&] { return ended(receiver.snapshot()); }));
@@ -83,7 +138,7 @@ int main(int argc, char** argv) {
     assert(result.phase == PcDownload::Phase::Done);
     assert(result.name == "single (2).txt" && read(result.path) == content);
     assert(read(util::path_join(inbox, "single.txt")) == "keep existing");
-    assert(server.pcShareComplete() && get("info").status == 404 && get("file", client).status == 404);
+    assert(server.pcShareComplete() && get("info", client).status == 404 && get("file", client).status == 404);
     assert(server.token() == phoneToken);
 
     auto folder = util::path_join(src, "Photos"); plat::make_dir(folder);
@@ -128,7 +183,10 @@ int main(int argc, char** argv) {
     assert(receiver.snapshot().phase == PcDownload::Phase::Failed);
     assert(!plat::file_stat(util::path_join(inbox, "large (2).jpg")).exists);
     for (const auto& entry : plat::list_dir(inbox)) assert(entry.name.find(".pcpart") == std::string::npos);
-    receiver.stop(); server.stop();
+    receiver.stop();
+    stopAllowing = true;
+    allower.join();
+    server.stop();
     plat::file_remove(large);
     plat::file_remove(util::path_join(inbox, "large.jpg"));
     std::cout << "Native PC single/ZIP/empty transfers, checksum, collision, one receiver, cancellation/retry, revocation and phone isolation passed\n";

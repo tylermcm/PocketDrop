@@ -1,18 +1,68 @@
-"""Native PC receiver checks against adversarial local HTTP fixtures; no browser or user files."""
+"""Native PC receiver checks against adversarial local HTTP fixtures; no browser or user files.
+
+The fixture is a sender that speaks PC Share v2 (X25519 pairing, ChaCha20-Poly1305 frames) so the receiver can be given
+well-formed and hostile behaviour: bad names and sizes, damaged, cut-off or foreign-keyed streams, redirects and so on.
+Needs the `cryptography` package (pip install cryptography).
+"""
 import hashlib
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import threading
 import zlib
 import zipfile
 
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "build/tests/pc_transfer_test.exe"
+EXE = Path(os.environ.get("PC_TRANSFER_TEST") or next(
+    (p for p in (ROOT / "build/tests/pc_transfer_test.exe", ROOT / "build/tests-linux/pc_transfer_test", ROOT / "build/tests/pc_transfer_test") if p.exists()),
+    ROOT / "build/tests/pc_transfer_test.exe"))
 OFFER = "a" * 32
 PAYLOAD = b"PocketDrop native fixture\n" * 4000
+FRAME = 64 * 1024
+SALT = b"PocketDrop PC Share v2"
+
+
+def raw(key):
+    return key.public_key().public_bytes_raw()
+
+
+def hmac256(key, msg):
+    return hmac.new(key, msg, hashlib.sha256).digest()
+
+
+def nonce(counter):
+    return b"\0\0\0\0" + struct.pack("<Q", counter)
+
+
+def derive(shared, pk_sender, pk_receiver):
+    prk = hmac256(SALT, shared)
+    ctx = pk_sender + pk_receiver
+    return hmac256(prk, b"key" + ctx), hmac256(prk, b"claim" + ctx).hex()[:32]
+
+
+def frames(key, data, tamper=False):
+    out = bytearray()
+    counter = 0
+    for i in range(0, len(data), FRAME):
+        chunk = data[i:i + FRAME]
+        header = struct.pack("<I", len(chunk))
+        counter += 1
+        out += header + ChaCha20Poly1305(key).encrypt(nonce(counter), chunk, header)
+    counter += 1
+    header = struct.pack("<I", 0)
+    out += header + ChaCha20Poly1305(key).encrypt(nonce(counter), b"", header)
+    if tamper:
+        out[len(out) // 2] ^= 1
+    return bytes(out)
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
@@ -26,36 +76,52 @@ class Handler(BaseHTTPRequestHandler):
             try: self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
     def do_GET(self):
-        mode = self.server.mode
+        server = self.server
+        mode = server.mode
         route = self.path.split("/")[-1].split("?")[0]
         data = b"" if mode == "zero" else PAYLOAD
+        claimed = self.headers.get("X-PocketDrop-Receiver", "")
         if route == "redirected":
-            self.server.redirected = True
+            server.redirected = True
             self.reply(200, b"should not follow")
-        elif route == "info":
+        elif route == "hello":
             if mode == "redirect":
-                self.reply(302, Location=f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/redirected")
+                self.reply(302, Location=f"http://{server.server_address[0]}:{server.server_address[1]}/redirected")
                 return
+            peer = bytes.fromhex(self.headers.get("X-PocketDrop-Key", ""))
+            mine = X25519PrivateKey.generate()
+            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer))
+            server.key, server.claim = derive(shared, raw(mine), peer)
+            if mode == "stranger":                       # seals with a key the receiver does not share
+                server.key = os.urandom(32)
+            self.reply(200, raw(mine).hex().encode())
+        elif claimed != getattr(server, "claim", None):
+            self.reply(404)
+        elif route == "status":
+            self.reply(200, b"declined" if mode == "declined" else b"accepted")
+        elif route == "info":
             name = "../../escape.txt" if mode == "traversal" else "empty.txt" if mode == "zero" else "payload.txt"
-            size = "18446744073709551616" if mode == "overflow" else str(2**63-1) if mode == "disk" else str(len(data))
-            self.reply(200, f"PDPC1\n{size}\n{name}".encode())
+            size = "18446744073709551616" if mode == "overflow" else str(2**63 - 1) if mode == "disk" else str(len(data))
+            sealed = ChaCha20Poly1305(server.key).encrypt(nonce(0), f"PDPC1\n{size}\n{name}".encode(), b"pdpc2 info")
+            self.reply(200, sealed)
         elif route == "file":
-            self.server.downloaded = True
+            server.downloaded = True
             if mode == "closed": self.reply(404); return
+            body = frames(server.key, data, tamper=mode == "tampered")
             if mode == "truncated":
                 self.send_response(200)
-                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(data[:10])
+                self.wfile.write(body[:10])
                 self.close_connection = True
                 return
-            self.reply(200, data)
+            self.reply(200, body)
         elif route in ("verify", "complete"):
             actual = self.path.split("crc=")[-1]
             good = mode != "checksum" and actual == str(zlib.crc32(data))
-            if route == "complete" and good: self.server.completed = True
+            if route == "complete" and good: server.completed = True
             self.reply(204 if good else 422)
-        elif route == "cancel": self.reply(204)
+        elif route in ("cancel", "keepalive"): self.reply(204)
         else: self.reply(404)
 
 def check():
@@ -63,7 +129,7 @@ def check():
     probe.connect(("192.0.2.1", 9))
     ip = probe.getsockname()[0]
     probe.close()
-    for mode in ("success", "zero", "traversal", "overflow", "disk", "truncated", "checksum", "closed", "redirect"):
+    for mode in ("success", "zero", "traversal", "overflow", "disk", "truncated", "checksum", "closed", "redirect", "tampered", "stranger", "declined"):
         server = ThreadingHTTPServer((ip, 0), Handler)
         server.mode, server.downloaded, server.completed, server.redirected = mode, False, False, False
         thread = threading.Thread(target=server.serve_forever, daemon=True)
