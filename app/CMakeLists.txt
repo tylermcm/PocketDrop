@@ -41,5 +41,5 @@ target_compile_definitions(PocketDrop PRIVATE $<$<BOOL:${WIN32}>:UNICODE _UNICOD
 # The screen travels inside the executable.
 qt_add_resources(PocketDrop views PREFIX "/pd" BASE ${CMAKE_CURRENT_SOURCE_DIR}/../qml FILES
     ../qml/PocketDropView.qml ../qml/PdIcon.qml ../qml/PdButton.qml ../qml/PdChip.qml ../qml/PdSwitch.qml
-    ../qml/PdMenu.qml ../qml/PdMenuEntry.qml ../qml/PdPairing.qml ../qml/theme.json)
+    ../qml/PdMenu.qml ../qml/PdMenuEntry.qml ../qml/PdPairing.qml ../qml/PdInvite.qml ../qml/theme.json)
 qt_add_resources(PocketDrop host PREFIX "/pd" BASE ${CMAKE_CURRENT_SOURCE_DIR} FILES main.qml)

@@ -45,7 +45,7 @@ BASE = {
     "linkText": "192.168.1.24:47291/k_0fSDWUG_YS5ZN8vPvwy", "linkEmpty": "", "copied": False, "copyLabel": "Copy link",
     "info": {"kind": "code", "left": "", "right": "", "code": "ZRQ5-DMYC", "frac": 0.0, "incoming": False},
     "rows": [], "sharing": False,
-    "pc": {"mode": 0, "sent": False, "phase": 0, "senders": [], "code": "", "pair": {"pending": False, "name": "", "code": ""}, "name": "", "error": "", "received": 0, "total": 0},
+    "pc": {"mode": 0, "sent": False, "phase": 0, "senders": [], "nearby": {"visible": True, "peers": [], "invite": None, "target": ""}, "code": "", "pair": {"pending": False, "name": "", "code": ""}, "name": "", "error": "", "received": 0, "total": 0},
     "menu": {"burn": False, "auto": False, "warn": True, "topmost": False, "tunnelOpen": False, "inbox": "Downloads/PocketDrop",
              "addrs": [{"ip": "192.168.1.24", "adapter": "Wi-Fi", "selected": True}], "noteClip": False, "phones": 2,
              "history": [{"i": 0, "kind": "f", "title": "IMG_4821.HEIC", "device": "iPhone", "when": "3 min ago", "size": 3400000},
@@ -86,6 +86,12 @@ STATES = {
     "pc_receive_progress": (make(card="pc", status="Receiving", tone="recv", pc={"mode": 2, "phase": 2, "received": 640, "total": 1000, "name": "Georgia trip.zip"},
                                  info={"kind": "active", "left": "64%  ·  Georgia trip.zip  ←  KITCHEN-PC", "right": "92 MB/s", "frac": 0.64, "incoming": True}), [], {}),
     "pc_pick_sender": (make(card="pc", status="PC Receive", pc={"mode": 2, "phase": 0, "senders": [{"name": "KITCHEN-PC", "ip": "192.168.1.31"}, {"name": "STUDY-LAPTOP", "ip": "192.168.1.40"}]}), [], {}),
+    "nearby_peers": (make(pc={"nearby": {"peers": [{"id": "a" * 32, "name": "KITCHEN-PC", "ip": "192.168.1.31", "sending": False},
+                                                   {"id": "b" * 32, "name": "STUDY-LAPTOP", "ip": "192.168.1.40", "sending": False},
+                                                   {"id": "c" * 32, "name": "Tyler's MacBook Pro", "ip": "192.168.1.52", "sending": False}]}}), ROWS[:2], {}),
+    "nearby_invite": (make(pc={"nearby": {"peers": [{"id": "a" * 32, "name": "KITCHEN-PC", "ip": "192.168.1.31", "sending": True}],
+                               "invite": {"id": "a" * 32, "name": "KITCHEN-PC", "ip": "192.168.1.31"}}}), [], {}),
+    "nearby_waiting": (make(card="pc", status="PC Send", pc={"mode": 1, "nearby": {"target": "KITCHEN-PC"}}), ROWS[:1], {}),
     "menu_open": (make(), ROWS, {"menu": True}),
     "risk": (make(), [], {"risk": True}),
 }
@@ -184,6 +190,8 @@ class Preview:
         if opts.get("menu"):
             QMetaObject.invokeMethod(self.window, "openMenu")
         self.settle()
+        self.window.grabWindow()          # a frame has to be drawn before items are laid out for hit testing
+        self.settle(0.05)
 
     def settle(self, seconds: float = 0.25):
         import time

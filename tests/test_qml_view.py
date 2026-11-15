@@ -28,11 +28,25 @@ def preview():
     yield p
 
 
+def find(preview, name):
+    """An item by object name, searching the visual tree (delegates inside a Flickable are not QObject children of the window)."""
+    stack = [preview.window.contentItem()]
+    while stack:
+        item = stack.pop()
+        if item.objectName() == name:
+            return item
+        stack.extend(item.childItems())
+    return None
+
+
 def click(preview, name):
-    item = preview.window.findChild(QQuickItem, name)
+    item = find(preview, name)
     assert item is not None, f"no item named {name}"
     assert item.isVisible(), f"{name} is not visible"
     point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2)).toPoint()
+    preview.window.requestActivate()
+    QTest.mouseMove(preview.window, point)           # hover first, as a pointer would, so the handlers are armed
+    preview.settle(0.05)
     QTest.mouseClick(preview.window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
     preview.settle(0.15)
 
@@ -100,3 +114,34 @@ def test_the_risk_prompt_answers_through_the_backend(preview):
     preview.backend.sent.clear()
     preview.backend.confirmRisk(True, False)
     assert ("confirmRisk", "True,False") in preview.backend.sent
+
+
+def test_nearby_pcs_are_chips_that_send_files_to_that_pc(preview):
+    preview.show("nearby_peers")
+    strip = preview.window.findChild(QQuickItem, "nearbyStrip")
+    assert strip is not None and strip.isVisible()
+    preview.backend.sent.clear()
+    click(preview, "peerChip0")
+    assert ("pc_send_to", "a" * 32) in preview.backend.sent          # there are files in the list, so it sends at once
+
+
+def test_no_nearby_strip_without_other_pcs(preview):
+    preview.show("wifi_empty")
+    assert not preview.window.findChild(QQuickItem, "nearbyStrip").isVisible()
+
+
+def test_an_invitation_is_accepted_or_declined(preview):
+    preview.show("nearby_invite")
+    preview.backend.sent.clear()
+    click(preview, "acceptInvite")
+    assert ("pc_invite_accept", "") in preview.backend.sent
+    preview.show("nearby_invite")
+    preview.backend.sent.clear()
+    click(preview, "declineInvite")
+    assert ("pc_invite_decline", "") in preview.backend.sent
+
+
+def test_waiting_for_a_targeted_pc_names_it(preview):
+    preview.show("nearby_waiting")
+    image = preview.grab()
+    assert not image.isNull()

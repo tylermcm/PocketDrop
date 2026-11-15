@@ -10,7 +10,7 @@ The view is pure: it draws state and sends commands. It never touches files, soc
   - `rows` (`QVariantList`): the list to show (the engine's rows; a host may merge its own, such as Image Triage's Library groups).
   - `riskPending` (bool), `confirmRisk(proceed, dontAskAgain)`.
   - `start()`, `command(name, arg)`, `setMode(int)`, `addUrls(list)`, `addText(text)`, `removeRow(key)`, `clearAll()`, `changeInbox(url)`.
-- Commands are the engine's (`Ui::command`): `copy open_link new_link share paste card addr row menu pc_send pc_receive pc_stop pc_action pc_pick pc_allow pc_decline history_open`, and `menu` with `open_inbox burn warn_any topmost stop_tunnel about note_clip forget_phones history_clear`.
+- Commands are the engine's (`Ui::command`): `copy open_link new_link share paste card addr row menu pc_send pc_receive pc_stop pc_action pc_pick pc_allow pc_decline pc_send_to pc_invite_accept pc_invite_decline history_open`, and `menu` with `open_inbox burn warn_any topmost stop_tunnel about note_clip forget_phones history_clear visible`.
 
 ## Extension points
 
