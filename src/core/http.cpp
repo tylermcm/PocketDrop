@@ -991,6 +991,11 @@ HttpServer::PcPairing HttpServer::pcPairing() const {
     return p;
 }
 
+bool HttpServer::pcClaimed() const {
+    std::lock_guard<std::mutex> l(mu_);
+    return pcOffer_ && pcOffer_->active && pcOffer_->pair != PcOffer::Pair::None;
+}
+
 void HttpServer::pcAnswer(bool accept) {
     {
         std::lock_guard<std::mutex> l(mu_);
